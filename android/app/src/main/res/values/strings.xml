@@ -1,0 +1,148 @@
+<resources>
+    <string name="app_name">金鳞抽卡导出小助手</string>
+    <string name="vpn_session_name">金鳞抽卡导出小助手</string>
+
+    <string name="status_idle">就绪</string>
+    <string name="status_running">监听中</string>
+    <string name="status_recording">监听中 · 录包中</string>
+    <string name="btn_start">开始抓包</string>
+    <string name="btn_stop">停止抓包</string>
+
+    <!-- 07 观测面板：录包按钮（App 内；通知栏 record_action/record_stop 两个写原始流量入口已移除，见文件尾注释） -->
+    <string name="btn_record_start">录包</string>
+    <string name="btn_record_stop">停录</string>
+    <string name="btn_clear_log">清空日志</string>
+    <!-- Android 资源格式化串须带位置号（%1$s）：裸 %s 会被 Lint 判 StringFormatInvalid -->
+    <string name="record_started">开始录包，输出 %1$s</string>
+    <string name="record_stopped">已停止录包，文件已保存</string>
+    <string name="record_auto_stopped">全量录包自动停止：%1$s</string>
+    <string name="log_cleared">日志已清空</string>
+
+    <string name="game_missing">未安装目标游戏，请先安装《夜幕之下》</string>
+    <string name="vpn_permission_denied">未授予 VPN 权限</string>
+    <string name="notif_permission_denied">未授予通知权限：通知栏「录包 / 抓诊断」按钮不可见，抓包与切帧不受影响</string>
+    <string name="vpn_establish_failed">VPN 通道建立失败</string>
+
+    <string name="notification_channel">抓包服务</string>
+    <string name="notification_title">正在监听抽卡流量</string>
+    <string name="notification_text">后台被动记录，不修改任何数据</string>
+    <!-- 通知栏「录包/停录」「抓诊断」两个写原始流量入口已移除，对应字符串 diagnose_action/record_action/record_stop 一并删除 -->
+
+    <!-- 抓包主页常驻提示（08 §4.2；文案逐字对齐 PC gui/main_window.py:273 的 capture_note_label，B8 仅采纳「全部卡池」） -->
+    <string name="capture_note_all_pools">ⓘ 抓取抽卡记录时只采纳「全部卡池」页面的数据——请在该页翻页，其余页面翻到的记录不计入</string>
+
+    <!-- ===== 09 设置模块（5 组：抓包 / 数据互通 / 元数据 / 数据维护 / 关于；账号组已于 2026-09-14 移入统计页，见 09 §12） ===== -->
+    <string name="settings_title">设置</string>
+    <string name="settings_section_capture">抓包</string>
+    <string name="settings_section_sync">数据互通</string>
+    <string name="settings_section_metadata">元数据</string>
+    <string name="settings_section_maintenance">数据维护</string>
+    <string name="settings_section_about">关于</string>
+
+    <!-- 抓包组（只读项） -->
+    <string name="settings_capture_status">运行状态</string>
+    <string name="settings_capture_scope">接管范围</string>
+    <string name="settings_scope_value">仅《夜幕之下》</string>
+    <string name="settings_known_endpoints">已知端点</string>
+    <string name="settings_endpoints_identifying">正在识别…</string>
+    <string name="settings_endpoint_confirmed">%1$s（已确认）</string>
+    <string name="settings_status_idle">未抓包</string>
+    <string name="settings_status_running">抓包中</string>
+    <string name="settings_status_recording">录包中</string>
+
+    <!-- 数据互通组 -->
+    <string name="settings_export">导出记录</string>
+    <string name="settings_import">导入记录</string>
+    <string name="settings_coming_soon">开发中</string>
+
+    <!-- 元数据组 -->
+    <string name="settings_metadata_version">数据版本</string>
+    <string name="settings_metadata_fetched">最后拉取</string>
+    <string name="settings_metadata_fetch">手动拉取元数据</string>
+    <string name="settings_metadata_fetching">拉取中…</string>
+    <string name="settings_metadata_updated">已更新到 v%1$s</string>
+    <string name="settings_not_fetched">未拉取</string>
+    <!-- 拉取失败分层文案（对齐 11 §3） -->
+    <string name="metadata_fetch_err_network">网络不可用，请检查后重试</string>
+    <string name="metadata_fetch_err_auth">鉴权失败（可能 key/secret 已更新）</string>
+    <string name="metadata_fetch_err_not_ready">服务端数据未就绪</string>
+    <string name="metadata_fetch_err_format">返回数据格式异常</string>
+    <string name="metadata_fetch_err_http">拉取失败（HTTP %1$d）</string>
+    <string name="metadata_fetch_err_unknown">元数据拉取失败</string>
+
+    <!-- 数据维护组（「未映射 ID」行已于 2026-09-14 移除，只在抓包页保留，见 09 §12.2） -->
+    <string name="settings_clear_data">清理本地数据</string>
+
+    <!-- 关于组 + 页脚 -->
+    <string name="settings_app_version">应用版本</string>
+    <string name="settings_version_value">%1$s (%2$d)</string>
+    <string name="settings_faq">常见问题</string>
+    <string name="open_url_no_handler">未找到可打开链接的应用</string>
+    <string name="settings_footer_sponsor">本工具由金麟街云老板独家赞助</string>
+
+    <!-- ===== 统计页（Tab3）：顶部「用户管理」组 + 统计内容 ===== -->
+    <string name="stats_title">统计</string>
+    <string name="stats_section_users">用户管理</string>
+    <!-- 运行中提示（§3.78 口径：统计取停止后全量，抓包中为已落库历史） -->
+    <string name="stats_running_hint">抓包进行中，停止后更新</string>
+    <!-- 封面摘要行（对齐 PC PityPanel 顶部） -->
+    <string name="stats_summary_total">总抽数</string>
+    <string name="stats_summary_six">6星</string>
+    <string name="stats_summary_shipped">出货池</string>
+    <string name="stats_summary_rate">6星率</string>
+    <string name="stats_summary_nonwarp">不歪率</string>
+    <!-- 分布 / 非歪率 / 空态 -->
+    <string name="stats_pool_dist_title">卡池分布</string>
+    <string name="stats_rarity_dist_title">稀有度分布</string>
+    <string name="stats_nonwarp_title">非歪率</string>
+    <string name="stats_no_data">暂无数据</string>
+    <string name="stats_empty_title">暂无统计数据</string>
+    <string name="stats_empty_hint">开启抓包并翻页后，这里按账号展示统计摘要、卡池与稀有度分布、非歪率</string>
+
+    <!-- 保底总览（Tab1 页身，08 §4） -->
+    <string name="pity_overview_title">保底总览</string>
+    <string name="pity_overview_empty_title">尚无有效抽卡数据</string>
+    <string name="pity_overview_empty_hint">开启抓包后进入游戏翻几页抽卡记录，这里的保底会自动更新</string>
+    <string name="pity_untouched">未出六星</string>
+    <string name="pity_tag_up">[UP]</string>
+    <string name="pity_tag_warp">[歪]</string>
+
+    <!-- 用户管理组（原设置页「账号组」，2026-09-14 整体移入统计页；交互与文案不变） -->
+    <string name="account_current">当前账号</string>
+    <string name="account_new">新建</string>
+    <string name="account_rename">重命名</string>
+    <string name="account_delete">删除</string>
+    <string name="account_value_empty">—</string>
+
+    <!-- 用户管理组弹窗 / 提示 -->
+    <string name="account_dialog_switch">切换账号</string>
+    <string name="account_dialog_new">新建账号</string>
+    <string name="account_dialog_rename">重命名账号</string>
+    <string name="account_dialog_delete">删除账号</string>
+    <string name="account_name_label">账号名称</string>
+    <string name="account_action_confirm">确定</string>
+    <string name="account_action_cancel">取消</string>
+    <string name="account_action_close">关闭</string>
+    <string name="account_delete_warning">将删除「%1$s」并把其记录文件归档到 users/（可人工恢复）。此操作不可撤销。</string>
+    <string name="account_toast_duplicate_name">已存在同名账号</string>
+    <string name="account_toast_created">已创建「%1$s」</string>
+    <string name="account_toast_renamed">已重命名为「%1$s」</string>
+    <string name="account_toast_deleted">已删除账号，记录文件已归档</string>
+    <string name="account_toast_delete_last_refused">仅剩一个账号，不能删除</string>
+    <string name="account_toast_switched">已切换到「%1$s」</string>
+
+    <!-- 清空当前账号历史 / 还原抽卡数据（2026-09-16，对齐 PC clear_records + _restore_data） -->
+    <string name="account_clear_history">清空当前账号历史</string>
+    <string name="account_restore_history">还原抽卡数据</string>
+    <string name="account_need_stop">请先停止抓包</string>
+    <string name="account_action_restore">还原</string>
+    <string name="account_clear_warning">将删除「%1$s」的全部本地抽卡历史，并丢弃本场已抓的记录。\n\n清空前会自动备份，可在「还原抽卡数据」中找回（最多保留最近 %2$d 份）。\n\n此操作不可撤销。</string>
+    <string name="account_restore_dialog_title">选择还原点</string>
+    <string name="account_restore_empty">当前账号暂无可用备份。\n\n备份会在每次「清空当前账号历史」时自动生成。</string>
+    <string name="account_restore_warning">将用「%1$s」覆盖当前历史。\n\n当前历史会先另存为一份备份，可反复还原。</string>
+    <string name="account_toast_cleared_backed_up">已清空，旧数据已备份</string>
+    <string name="account_toast_cleared">已清空（此前无历史，未产生备份）</string>
+    <string name="account_toast_clear_failed">清空失败，请查看日志</string>
+    <string name="account_toast_restored">已还原到 %1$s</string>
+    <string name="account_toast_restore_failed">还原失败，请查看日志</string>
+</resources>

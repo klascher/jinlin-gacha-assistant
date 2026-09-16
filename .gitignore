@@ -1,0 +1,19 @@
+# 构建产物 / 本机配置
+.gradle/
+.kotlin/
+build/
+*/build/
+app/build/
+local.properties
+.idea/
+*.iml
+captures/
+
+# 签名材料（绝不入库）
+*.jks
+*.keystore
+*.apk
+
+# 运行期产物
+records/
+diagnose/

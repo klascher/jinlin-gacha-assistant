@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 转发层需开真实 socket 承运游戏流量，必须 INTERNET（缺失 ⇒ socket() EPERM、游戏全连不上） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- VpnService 前台服务 + 通知所需权限（targetSdk 35 需显式声明服务类型） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.JinlinGacha"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- VpnService 必须由系统以 BIND_VPN_SERVICE 权限绑定 -->
+        <service
+            android:name=".vpn.GachaVpnService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+    </application>
+
+    <!-- Android 11+（API 30）包可见性限制：须显式声明目标游戏包，
+         否则 getApplicationInfo/.uid 对第三方包一律抛 NameNotFoundException，
+         即使游戏已安装也会误判「未安装」，且 VpnService 解 uid 失败。 -->
+    <queries>
+        <package android:name="com.bmystu.peng.gw" />
+    </queries>
+</manifest>
