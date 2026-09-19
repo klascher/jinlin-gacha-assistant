@@ -19,6 +19,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -29,6 +32,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jinlin.gacha.assistant.R
+import com.jinlin.gacha.assistant.persistence.CaptureDetail
+import com.jinlin.gacha.assistant.persistence.HistoryEpoch
+import com.jinlin.gacha.assistant.persistence.HistoryStore
+import com.jinlin.gacha.assistant.persistence.ProfileStore
 import com.jinlin.gacha.assistant.ui.theme.BlueRarity
 import com.jinlin.gacha.assistant.ui.theme.GoldRarity
 import com.jinlin.gacha.assistant.ui.theme.GrayRarity
@@ -37,6 +44,7 @@ import com.jinlin.gacha.assistant.ui.theme.JinlinColors
 import com.jinlin.gacha.assistant.ui.theme.PurpleRarity
 import com.jinlin.gacha.assistant.ui.stats.StatsReport
 import com.jinlin.gacha.assistant.ui.stats.statsReport
+import java.io.File
 import java.util.Locale
 
 /**
@@ -57,6 +65,13 @@ fun StatsScreen() {
     val context = LocalContext.current
     val colors = LocalJinlinColors.current
     val report = statsReport(context)
+    // 上一场**已落库**抓包的起止（U5 §17.8.1）：提示条第二行「截至 …」用。
+    // 与记录页同源同口径（`last_capture_detail`，**只**由停抓收尾那条 merge 写入）。
+    val prof by ProfileStore.get(context).state.collectAsState()
+    val epoch by HistoryEpoch.state.collectAsState()
+    val lastCapture: CaptureDetail? = remember(prof.activeId, report.isRunning, epoch) {
+        HistoryStore(File(context.filesDir, ProfileStore.USERS_DIR), prof.activeId).captureDetail
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -73,15 +88,13 @@ fun StatsScreen() {
             )
         }
 
-        // —— 运行中提示（§3.78 口径：统计取停止后全量，抓包中数据为停止前已落库历史）——
+        // —— 运行中提示条（U5 §17.8.1；§3.78 口径：统计取停止后全量，抓包中展示的是停止前已落库历史）——
+        // 机制本来就是「停止后才更新」（报告缓存的 key **不含实时数据**）⇒ 这里只把「一行 12sp 灰字」
+        // 改成「带底色的提示条」，并把「截至时刻」写出来，让「看到的是哪一次的数据」无歧义。
+        // ⚠️ 本页正是靠 `cleanup()` 里「**先落库、后复位状态**」的顺序，在停止瞬间读到新数据 ——
+        //    那个顺序是**承重**的，不可调换（调换后本页会**静默**显示旧数据，不报错也不刷新）。
         if (report.isRunning) {
-            item {
-                Text(
-                    text = stringResource(R.string.stats_running_hint),
-                    fontSize = 12.sp,
-                    color = colors.onSurfaceMuted,
-                )
-            }
+            item { StatsRunningBar(lastCapture = lastCapture, colors = colors) }
         }
 
         // —— 用户管理（账号切换 / 新建 / 重命名 / 删除）——
@@ -103,6 +116,47 @@ fun StatsScreen() {
 
         // —— 非歪率 ——
         item { NonWarpCard(report, colors) }
+    }
+}
+
+/**
+ * 统计页「抓包中」提示条（U5 §17.8.1）：**带底色**（`surfaceVariant`）而非裸灰字，一眼能看见。
+ *
+ * 两行：
+ * 1. `stats_running_hint` —— 说明下面显示的是**上次抓完**的数据、停止后才更新；
+ * 2. `stats_last_capture`（「截至 …」）—— 把「上次抓取时刻」写出来；**从未停抓过则不出这一行**
+ *    （不写「截至 —」，宁可少一行也不给假的确定感）。
+ *
+ * ⚠️ 时刻**带月-日**（[formatCaptureRange]），刻意不写「今天」：本页会跨夜停留。
+ */
+@Composable
+private fun StatsRunningBar(lastCapture: CaptureDetail?, colors: JinlinColors) {
+    val start = lastCapture?.startedAt?.let(::parseCaptureTime)
+    val end = lastCapture?.endedAt?.let(::parseCaptureTime)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.stats_running_hint),
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                fontWeight = FontWeight.Bold,
+                color = colors.gold,
+            )
+            if (start != null && end != null) {
+                Text(
+                    text = stringResource(R.string.stats_last_capture, formatCaptureRange(start, end)),
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceMuted,
+                )
+            }
+        }
     }
 }
 

@@ -8,14 +8,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,9 +50,20 @@ import java.io.File
  *
  * ### 交互契约（对齐 PC `ProfileManager`，「即改即存」无保存按钮）
  * - 切换：`ProfileStore.setActive` → 因账号是进程级 StateFlow，抓包页顶栏与下次抓包的落库账号**即时联动**；
- * - 新建 / 重命名：名称去空白；与现有账号**重名则拒绝**（Toast，避免两个同名账号无法区分）；
+ *   ⚠️ **抓包中禁止切换**（2026-09-19 用户裁定）：入口行置灰并显示「请先停止抓包」，且抓包一启动就
+ *   **当场关闭**已打开的切换弹窗（通知栏也能起抓包，只置灰入口拦不住）。理由是账号归属在开抓那刻
+ *   绑定，中途切会让界面与落库对不上；闸与「清空 / 还原」同源。
+ *   ⚠️ 另：**会话内存态**（本次抓到的记录 / 完整性快照）属于**开抓时的那个账号**，不会跟着切 ——
+ *   记录页与抓包页通过 `rememberOwnedSession(activeId)` 按归属取，非本账号一律显示空态
+ *   （2026-09-19 实机反馈的缺陷）。故**切换用户不需要在这里补清理**，也不要直接读
+ *   `GachaVpnService.records` —— 那会绕过归属校验，让新账号看到上一个账号的数据。
+ * - 新建 / 重命名：名称去空白；与现有账号**重名则拒绝**（Toast，避免两个同名账号无法区分）。
+ *   二者**不设抓包闸** —— 不改 `activeId`、不碰本场落库目标，抓包中做是安全的。
  * - 删除：红字二次确认；**仅剩一个账号时按钮禁用**（Store 内部同样拒绝，双保险）；删除时记录文件归档为
- *   `<id>_<stamp>.json`。
+ *   `<id>_<stamp>.json`。**抓包中也禁用**（2026-09-19 用户裁定）：删的一直是**活动账号**
+ *   （`store.delete(prof.activeId)`），而本场记录 / Δ 基准 / 落库目标在开抓那刻已绑定到它 ⇒
+ *   中途删掉会让本场 `merge` 写回一个**已被归档**的账号。因该按钮没有 `ActionRow` 的尾注位，
+ *   置灰理由用其下一行小字承载（`account_delete_need_stop`）。
  *
  * ### 清空 / 还原（2026-09-16 新增，对齐 PC `btn_clear` + `_restore_data`）
  * 「清空当前账号历史」与「还原抽卡数据」放在本组而非设置页：PC 的清空按钮就紧挨账号下拉框
@@ -58,6 +73,8 @@ import java.io.File
  *
  * **两项都要求先停止抓包**（抓包中置灰）：本场会话的 Δ 已在 `SessionDedup` 内按会话开始时的
  * 基准实时归一化（收下即 `pos − Δ`），中途清空或换坐标系会让本场记录位置整体错位。
+ * **且抓包一启动就关闭它们的弹窗**（含还原的两级弹窗）—— 通知栏也能起抓包，只置灰入口拦不住
+ * （2026-09-19 与切换 / 删除一并收口，见 `LaunchedEffect(running)`）。
  */
 @Composable
 internal fun AccountSection(colors: JinlinColors) {
@@ -83,12 +100,31 @@ internal fun AccountSection(colors: JinlinColors) {
         HistoryStore(File(context.filesDir, ProfileStore.USERS_DIR), prof.activeId)
     }
 
+    // 抓包中禁止「账号身份 / 历史数据」类改动（2026-09-19）：入口行置灰只拦得住**从本页进**这条路径 ——
+    // 通知栏也能起停抓包，弹窗开着时抓包被通知栏起来，用户照样能把活动账号**切走 / 删掉 / 清空历史**。
+    // ⇒ 状态一翻转就**当场关闭**这些弹窗（与「接管范围」弹窗同一做法，见 `TargetPackagesDialog`）。
+    // 覆盖范围 = 全部会改 `activeId` 或动历史文件的操作：切换 · 删除活动账号 · 清空 · 还原（两级弹窗）。
+    // **刻意不含新建 / 重命名** —— 二者不改 `activeId`、不碰本场落库目标，抓包中做是安全的。
+    LaunchedEffect(running) {
+        if (running) {
+            showSwitchDialog = false
+            showDeleteDialog = false
+            showClearDialog = false
+            restoreList = null
+            pendingRestore = null
+        }
+    }
+
     GroupHeader(stringResource(R.string.stats_section_users), colors)
     SectionCard(colors) {
         ActionRow(
             label = stringResource(R.string.account_current),
-            trailing = activeName,
-            enabled = true,
+            // 抓包中禁止切换（2026-09-19 用户裁定）：本场会话的记录 / Δ 基准 / 落库目标账号
+            // 都在**开抓那一刻**绑定（`CaptureServiceState.sessionProfileId` + 服务侧 `sessionProfileId`），
+            // 中途切换只能让界面与落库对不上 —— 要么看到空数据，要么看到别人的数据。
+            // 闸与「清空 / 还原」一致（那两项同样要求先停抓包，理由同源：本场坐标系中途变不得）。
+            trailing = if (running) stringResource(R.string.account_need_stop) else activeName,
+            enabled = !running,
             onClick = { showSwitchDialog = true },
             colors = colors,
         )
@@ -109,12 +145,26 @@ internal fun AccountSection(colors: JinlinColors) {
                 modifier = Modifier.weight(1f),
             ) { Text(stringResource(R.string.account_rename), fontSize = 13.sp) }
 
-            // 仅剩一个账号时禁用（Store 内部也会拒绝，双保险）
+            // 仅剩一个账号时禁用（Store 内部也会拒绝，双保险）；
+            // **抓包中也禁用**（2026-09-19 用户裁定）：删除的一直是**活动账号**
+            // （`store.delete(prof.activeId)`），而本场记录 / Δ 基准 / 落库目标都在开抓那刻绑定到它
+            // ⇒ 中途删掉会让本场 `merge` 写回一个**已被归档**的账号（`<id>_<stamp>.json`）。
             OutlinedButton(
                 onClick = { showDeleteDialog = true },
-                enabled = prof.items.size > 1,
+                enabled = prof.items.size > 1 && !running,
                 modifier = Modifier.weight(1f),
             ) { Text(stringResource(R.string.account_delete), fontSize = 13.sp) }
+        }
+        // 这三颗按钮没有 `ActionRow` 的尾注位（`请先停止抓包` 放不下），故把理由补在下行 ——
+        // 否则「点了没反应」比置灰本身更难解释。**只提删除**：新建 / 重命名不改 activeId、不碰
+        // 本场落库目标，抓包中做是安全的，故它们保持可用。
+        if (running) {
+            Text(
+                text = stringResource(R.string.account_delete_need_stop),
+                fontSize = 11.sp,
+                color = colors.onSurfaceDim,
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+            )
         }
         RowDivider(colors)
         // 抓包中禁用：本场会话的 Δ 基准已按会话开始时的历史定死，中途清空/换坐标系会让本场记录错位
@@ -274,8 +324,11 @@ internal fun AccountSection(colors: JinlinColors) {
                 if (list.isEmpty()) {
                     Text(text = stringResource(R.string.account_restore_empty), fontSize = 14.sp)
                 } else {
-                    Column {
-                        for (b in list) {
+                    // 上限 30 份（`HistoryStore.MAX_BACKUPS`，2026-09-17 由 5 提到 30）⇒ **必须能滚**：
+                    // 原先的 `Column` 直排在 5 份时够用，30 份时第 6 项起就溢出屏幕了。
+                    // `AlertDialog` 的 text 区高度受限，LazyColumn 获得有限高度后自行滚动。
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(list, key = { it.file.absolutePath }) { b ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()

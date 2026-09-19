@@ -10,8 +10,11 @@ import java.io.File
  * 设置项快照（不可变值对象）。**改动一律走 [SettingsStore.update]**，页面只读渲染。
  *
  * 键名对齐 PC `gacha_exporter/storage/settings.py`（同名同构，未来 PC↔Android 可直接互认）：
- * `last_capture` 与 PC 同名同结构（`{profile_id: iso_str}`）；`auto_diagnose` / `metadata_*`
- * 是 mobile 新增。
+ * `last_capture` 与 PC 同名同结构（`{profile_id: iso_str}`）；`auto_diagnose` / `metadata_*` /
+ * `target_packages` / `guide_seen_version` 是 mobile 新增 —— PC 侧读到未知键会原样忽略，
+ * 不影响其读写（PC 只在自己的机器上跑，两边不会同时写同一个文件）。
+ * ⚠️ 「加新键安全」这条**只对新增键成立**：改**已有键的值类型**（例如把 `last_capture`
+ * 从字符串改成对象）会让 PC 的 `isinstance(val, str)` 守卫静默回空串，属真兼容问题。
  *
  * ### 两处「不实现」的说明
  * - **`active_profile` 不放这里**：当前账号的唯一真相源是 [ProfileStore]（`profiles.json`
@@ -27,6 +30,35 @@ data class Settings(
     val metadataVersion: String = "",
     /** 元数据最后拉取时间（展示用）。 */
     val metadataFetchedAt: String = "",
+    /**
+     * 用户**选定**要接管的**目标游戏包名**（**单选**；`vpn/TargetPackages` 用；mobile 新增）。
+     *
+     * **null = 从未配置过** ⇒ 由 `TargetPackages.decide` 走「自动检出（仅 1 个）> 官服兜底」；
+     * 检出多个时**不替用户决定**，而是要求用户到设置页选一个。刻意不赋予
+     * 「null = 一个都不接管」这层语义：设置页保存时拒绝空选，故二者不会撞车。
+     *
+     * 换渠道服（官服 `com.bmystu.peng.gw` ↔ 渠道服如 OPPO
+     * `com.bmystu.peng1.nearme.gamecenter`）在这里改即可，不必重新打包。
+     *
+     * ### ⚠️ 为什么是**单选**，而不是多选（2026-09-18 晚由多选改回）
+     * 多选会让**两个渠道的流量同时进 tun**，而整场抓包只有**一套**视图识别表
+     * （`core/dedup/ViewTracker` 的 `seq % 127` 配对表是全局单例）⇒ 两个游戏各自独立的
+     * seq 空间会撞进同一张表，响应可能配到另一个游戏的请求上（视图/页数错配）。
+     * 且记录**不按渠道隔离**，「当前人在玩哪个渠道」才是正确语义 ⇒ 换渠道时来设置页改选。
+     * 抓包中不可改：白名单在建立 tun 时定死（见 `GachaVpnService.startVpn`）。
+     */
+    val targetPackage: String? = null,
+    /**
+     * 首次引导**已读到的版本号**（U5，2026-09-18；原拟名 `onboarding_seen`）。
+     *
+     * 缺省 `0` = 没看过 ⇒ **首次进入抓包页**弹引导卡（三步骤）；看过（或点「不再提示」）
+     * 写 `1` ⇒ 不再弹；将来引导文案改版把值提到 `2` 即可**重新弹一次**
+     * （比纯布尔值多留一层余量）。
+     *
+     * ⚠️ 落点为什么不是「安装后立刻弹」或「点开始抓包时弹」：前者与操作场景脱节；
+     * 后者那刻用户**可能已经站在卡池页里了**，弹了等于叫他全部重来。
+     */
+    val guideSeenVersion: Int = 0,
 )
 
 /**
@@ -54,6 +86,13 @@ class SettingsStore(private val file: File) {
         private const val KEY_LAST_CAPTURE = "last_capture"
         private const val KEY_METADATA_VERSION = "metadata_version"
         private const val KEY_METADATA_FETCHED_AT = "metadata_fetched_at"
+        private const val KEY_TARGET_PACKAGE = "target_package"
+        /**
+         * **多选时代的旧键**（2026-09-18 单选化后不再写入）—— 只读兼容：取首项。
+         * 保留的理由：开发机/早期构建可能已落过该键，静默丢弃会让「已经选过的渠道」失效。
+         */
+        private const val KEY_TARGET_PACKAGES_LEGACY = "target_packages"
+        private const val KEY_GUIDE_SEEN_VERSION = "guide_seen_version"
 
         /** UI 与 Service 共用的进程级实例（保证两边看到同一份 StateFlow）。 */
         @Volatile
@@ -107,6 +146,21 @@ class SettingsStore(private val file: File) {
     fun setMetadata(version: String, fetchedAt: String) =
         update { it.copy(metadataVersion = version, metadataFetchedAt = fetchedAt) }
 
+    /**
+     * 写入用户选定的接管包名（设置页「接管范围」弹窗保存时调用）。
+     *
+     * **单选**：一次一个；空白包名视作清空（回「从未配置过」）。
+     */
+    fun setTargetPackage(packageName: String) =
+        update { it.copy(targetPackage = packageName.takeIf { p -> p.isNotBlank() }) }
+
+    /**
+     * 记录「首次引导已读到第几版」（U5）。看过引导卡即写当前版本号，此后不再弹；
+     * 引导文案改版时把传入值提高即可重新弹一次。
+     */
+    fun setGuideSeenVersion(version: Int) =
+        update { it.copy(guideSeenVersion = version) }
+
     /** 外部改动（如导入覆盖）后重新从磁盘加载。 */
     @Synchronized
     fun reload() {
@@ -129,6 +183,11 @@ class SettingsStore(private val file: File) {
             lastCapture = toStringMap(map[KEY_LAST_CAPTURE]),
             metadataVersion = (map[KEY_METADATA_VERSION] as? String) ?: "",
             metadataFetchedAt = (map[KEY_METADATA_FETCHED_AT] as? String) ?: "",
+            // 单选键优先；旧多选键只作兼容（取首项，单选化后不再写入）
+            targetPackage = (map[KEY_TARGET_PACKAGE] as? String)?.takeIf { it.isNotBlank() }
+                ?: toStringList(map[KEY_TARGET_PACKAGES_LEGACY]).firstOrNull(),
+            // MiniJson 把整数解码成 Long ⇒ 用 Number 接（Int / Long / Double 都吃得下）
+            guideSeenVersion = (map[KEY_GUIDE_SEEN_VERSION] as? Number)?.toInt() ?: 0,
         )
     }
 
@@ -147,7 +206,23 @@ class SettingsStore(private val file: File) {
         KEY_LAST_CAPTURE to LinkedHashMap<String, Any?>(s.lastCapture),
         KEY_METADATA_VERSION to s.metadataVersion,
         KEY_METADATA_FETCHED_AT to s.metadataFetchedAt,
+        KEY_TARGET_PACKAGE to s.targetPackage,
+        KEY_GUIDE_SEEN_VERSION to s.guideSeenVersion.toLong(),
     )
+
+    /**
+     * 读字符串数组；**不是数组**则回空列表，数组内的 null 项跳过（非字符串项转成文本）。
+     *
+     * 刻意不抛：`settings.json` 被手改坏不该让 App 起不来（与 [loadFromDisk] 同一条降级契约）。
+     */
+    private fun toStringList(v: Any?): List<String> {
+        val list = v as? List<*> ?: return emptyList()
+        val out = ArrayList<String>(list.size)
+        for (item in list) {
+            if (item != null) out.add(item.toString())
+        }
+        return out
+    }
 
     private fun toStringMap(v: Any?): Map<String, String> {
         val m = v as? Map<*, *> ?: return emptyMap()

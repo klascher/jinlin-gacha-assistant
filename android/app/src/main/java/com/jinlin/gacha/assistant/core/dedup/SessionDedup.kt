@@ -67,6 +67,18 @@ class SessionDedup(private val historyRecords: List<GachaRecord>) {
         private set
 
     /**
+     * 本次会话开始时**是否已有历史**（U5 发现 4，2026-09-18）。
+     *
+     * 这是 PC `gui/main_window.py:807-815` 重叠自检**三闸里的第一闸**
+     * （`had_history` = 会话开始前的历史状态），Android 移植时曾漏掉 —— 于是
+     * 「新账号首次抓取 / 清空后重抓」也会被判「与历史无重叠」，而它**根本没有历史可重叠**。
+     *
+     * 是**会话起点的只读快照**（[historyRecords] 构造后不再变化），**不参与任何判重**：
+     * `overlappedHistory` / `knownPositions` / 各条置真路径一律不动。
+     */
+    val hadHistory: Boolean = historyRecords.isNotEmpty()
+
+    /**
      * 会话开始：记录落库基准 total，Δ 从 0 起算，并重建历史位置/事件索引
      * （镜像 `begin_session_shift`）。
      *

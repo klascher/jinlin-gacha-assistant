@@ -85,6 +85,14 @@ class DedupPipeline(
     /** 会话内是否翻到过与历史重叠的边界。 */
     val overlappedHistory: Boolean get() = dedup.overlappedHistory
 
+    /**
+     * 会话开始时**是否已有历史**（U5 发现 4 的闸）。
+     *
+     * PC 的重叠自检有三道闸，`had_history` 是其一，Android 移植时漏掉 ⇒
+     * 新账号首抓也会被判「与历史无重叠」。**只读快照，不参与判重。**
+     */
+    val hadHistory: Boolean get() = dedup.hadHistory
+
     /** 本次会话从「被采纳」响应里解析出的记录条数（**含被判重跳过的旧记录**）。
      *  判「有没有在读到数据」用：>0 说明抓取在正常收流，只是可能全是被历史去重跳过的重复页。 */
     private var parsedTotal = 0

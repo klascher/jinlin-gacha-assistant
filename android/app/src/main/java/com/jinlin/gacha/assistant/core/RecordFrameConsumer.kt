@@ -2,8 +2,10 @@ package com.jinlin.gacha.assistant.core
 
 import com.jinlin.gacha.assistant.core.dedup.DedupPipeline
 import com.jinlin.gacha.assistant.core.dedup.EventAnomaly
+import com.jinlin.gacha.assistant.core.dedup.GapSummary
 import com.jinlin.gacha.assistant.core.dedup.MissingPages
 import com.jinlin.gacha.assistant.core.dedup.ViewIdentity
+import com.jinlin.gacha.assistant.core.dedup.ViewTracker
 
 /**
  * 去重会话的只读快照（供记录页提示与收尾日志；纯数据、零 Android 依赖）。
@@ -23,6 +25,51 @@ data class DedupSnapshot(
     val overlapped: Boolean = false,
     /** 按权威 total 推算仍缺的页数（翻到底可补齐）。 */
     val missingPageCount: Int = 0,
+
+    // —— U5（2026-09-18）健康指示所需字段；全部是**只读派生**，不改任何判定 ——
+
+    /**
+     * 会话开始前**是否已有历史**（发现 4 的闸）。
+     *
+     * PC `main_window.py:807-815` 的重叠自检有三道闸，这是第一道，Android 移植时漏掉 ⇒
+     * 新账号首抓 / 清空后重抓也会被判「与历史无重叠」。所有「与历史相关」的判据先过它。
+     */
+    val hadHistory: Boolean = false,
+
+    /**
+     * 是否存在 **A 类首屏缺口**（缺口早于本场已见的最小 offset）。
+     *
+     * 判据是 O(1) 的增量值（`ViewTracker.minSeenOffset > 0` 且该视图有权威 total）——
+     * 这是「第一页丢了却零提示」那个缺陷的正面判据：**继续翻拿不到，只能重新登录**。
+     */
+    val hasHeadGap: Boolean = false,
+
+    /** 是否存在 **B 类中段空洞**（缺口夹在已见页中间）—— 翻回去就能补，与历史无关。 */
+    val hasMidGap: Boolean = false,
+
+    /** A 类缺口 offset（升序；**落盘口径**，UI 层换算成「第 N 页」）。 */
+    val headGapPages: List<Int> = emptyList(),
+
+    /** B 类缺口 offset（升序）。 */
+    val midGapPages: List<Int> = emptyList(),
+
+    /** C 类缺口 offset（升序；「尾部未翻」，继续往下翻即可）。 */
+    val tailGapPages: List<Int> = emptyList(),
+
+    /** 「已拿到 N/M 页」的 **N**（全部卡池视图、口径与 PC `missing_pages` 的 seenCount 一致）。 */
+    val gapSeenPages: Int = 0,
+
+    /** 「已拿到 N/M 页」的 **M**（由服务器权威 total 推出；0 = 本场没拿到 total，判不出缺口）。 */
+    val gapExpectedPages: Int = 0,
+
+    /** 本场已见的最小 offset；**-1 = 该视图一页都没见**（判不出首屏缺口）。 */
+    val minSeenOffset: Int = -1,
+
+    /** 本场已见的最大 offset；-1 = 未知。 */
+    val maxSeenOffset: Int = -1,
+
+    /** 服务器权威总抽数（响应 field2）；**0 = 本场没拿到**（⇒ 判不出缺口）。子页「服务器记录 N 条」用。 */
+    val authoritativeTotal: Int = 0,
 )
 
 /**
@@ -152,10 +199,38 @@ class RecordFrameConsumer(
     @Synchronized
     fun unresolvedEvents(): List<EventAnomaly> = pipeline?.unresolvedEvents() ?: emptyList()
 
-    /** 当前 UI 快照。 */
+    /** 当前 UI 快照（含 U5 健康指示所需的只读派生字段）。 */
     @Synchronized
     fun snapshot(): DedupSnapshot {
         val p = pipeline ?: return DedupSnapshot()
+
+        // —— 缺页报告：只统计「全部卡池」视图 ——
+        // 镜像 PC `main_window._coverage_gap_text` 传 `missing_pages(view=all)`）：B8 下其它
+        // 视图本就被丢弃，其缺页不属于采纳数据的完整性缺口，纳入会误报「数据齐了还提示缺 X 页」
+        // （2026-09-14 实机反馈修复）。
+        //
+        // ⚠️ `missingPages()` 是 O(应有页数)，但它**本就在本方法里调用**（既有行为；§17.5
+        // 明确不改其算法）⇒ 下面的三分类**复用同一份结果**，本批**零新增** O(N) 调用。
+        val gaps = p.missingPages().filter { ViewIdentity.isAllPools(it.view) }
+        val gap = gaps.firstOrNull()
+
+        // 「全部卡池」的权威 total。key 可能是 "0@0"，老文件是裸 "0" ⇒ 用 isAllPools 判，不写死。
+        val totals = p.viewTotals()
+        val allPoolsKey = totals.keys.firstOrNull { ViewIdentity.isAllPools(it) }
+        val total = allPoolsKey?.let { totals[it] } ?: 0
+        val expected = ViewIdentity.expectedPageOffsets(total)
+        val missing = gap?.missing ?: emptyList()
+
+        // 三分类（A 首屏 / B 中段 / C 尾部）：`classifyGap` 只用到 `expected ∩ seen`，
+        // 而已知 `missing = expected − seen` ⇒ 交集可由 `expected − missing` 精确还原，
+        // 不必再遍历一次 seenPages。
+        val missingSet = missing.toSet()
+        val summary = if (expected.isEmpty()) {
+            GapSummary(emptyList(), emptyList(), emptyList(), emptyList())
+        } else {
+            ViewTracker.classifyGap(expected, expected.filterNot { it in missingSet }.toSet())
+        }
+
         return DedupSnapshot(
             allPoolsSeen = p.allPoolsSeen,
             droppedPages = p.droppedPages,
@@ -163,11 +238,21 @@ class RecordFrameConsumer(
             newCount = p.sessionNewCount,
             parsedCount = p.parsedCount,
             overlapped = p.overlappedHistory,
-            // 只统计「全部卡池」视图的缺页（镜像 PC `main_window._coverage_gap_text` 传
-            // `missing_pages(view=all)`）：B8 下其它视图本就被丢弃，其缺页不属于采纳数据的
-            // 完整性缺口，纳入会误报「数据齐了还提示缺 X 页」（2026-09-14 实机反馈修复）。
-            missingPageCount = p.missingPages().filter { ViewIdentity.isAllPools(it.view) }
-                .sumOf { it.missing.size },
+            missingPageCount = gaps.sumOf { it.missing.size },
+            hadHistory = p.hadHistory,
+            // hasHeadGap / headGapPages **同源**（都取 summary）：若各算一份，界面显示的
+            // 缺口明细与「有没有首屏缺口」会漂移。ViewTracker 的 O(1) minSeenOffset 仍
+            // 输出到快照供诊断展示，其与 summary 的一致性由单测守卫。
+            hasHeadGap = summary.hasHead,
+            hasMidGap = summary.hasMid,
+            headGapPages = summary.head,
+            midGapPages = summary.mid,
+            tailGapPages = summary.tail,
+            gapSeenPages = if (expected.isEmpty()) 0 else expected.size - missing.size,
+            gapExpectedPages = expected.size,
+            authoritativeTotal = total,
+            minSeenOffset = allPoolsKey?.let { p.viewTracker.minSeenOffset(it) } ?: -1,
+            maxSeenOffset = allPoolsKey?.let { p.viewTracker.maxSeenOffset(it) } ?: -1,
         )
     }
 }

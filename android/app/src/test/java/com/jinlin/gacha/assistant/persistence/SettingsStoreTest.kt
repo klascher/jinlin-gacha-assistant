@@ -2,6 +2,7 @@ package com.jinlin.gacha.assistant.persistence
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -16,7 +17,8 @@ import java.io.File
  * - **损坏文件回退默认值且不删原文件**；
  * - **值未变化时不写盘**（幂等闸）；
  * - payload 用 PC 同款 snake_case 键名，且**不含 `active_profile`**（账号真相源在 [ProfileStore]）；
- * - `last_capture` / `metadata_*` 读写往返；`reload()` 感知外部改动。
+ * - `last_capture` / `metadata_*` 读写往返；`reload()` 感知外部改动；
+ * - `target_packages`（2026-09-18 新增，渠道服接管范围）读写往返 + 去重 + **坏值降级**。
  */
 class SettingsStoreTest {
 
@@ -125,5 +127,70 @@ class SettingsStoreTest {
         s.reload()
         assertEquals("v2.0.0", s.current.metadataVersion)
         assertEquals("t2", s.current.metadataFetchedAt)
+    }
+
+    // —— target_package（接管范围**单选**，2026-09-18 渠道服支持；同日晚由多选改单选）——
+
+    @Test
+    fun `target package defaults to unset and round-trips`() {
+        val s = store()
+        assertNull("null = 从未配置过（走自动检出）", s.current.targetPackage)
+
+        s.setTargetPackage("com.bmystu.peng.gw")
+        assertEquals("com.bmystu.peng.gw", s.current.targetPackage)
+        // 落盘往返
+        assertEquals("com.bmystu.peng.gw", store().current.targetPackage)
+
+        // 换渠道 = 直接改（单选语义：旧值不残留）
+        s.setTargetPackage("com.bmystu.peng.bilibili")
+        assertEquals("com.bmystu.peng.bilibili", s.current.targetPackage)
+        assertEquals("com.bmystu.peng.bilibili", store().current.targetPackage)
+    }
+
+    @Test
+    fun `blank target package is treated as unset`() {
+        val s = store()
+        s.setTargetPackage("com.bmystu.peng.gw")
+        s.setTargetPackage("   ")
+        assertNull("空白视作清空（回「从未配置过」）", s.current.targetPackage)
+    }
+
+    @Test
+    fun `target package uses snake case key and tolerates bad values`() {
+        val s = store()
+        s.setTargetPackage("com.bmystu.peng.gw")
+        assertTrue(settingsFile().readText(Charsets.UTF_8).contains("\"target_package\""))
+
+        // 手改坏 settings.json 不该让 App 起不来（与既有降级契约一致）：
+        // 非字符串 ⇒ 回「未配置」；且不删原文件。
+        settingsFile().writeText("""{"target_package": 123}""", Charsets.UTF_8)
+        assertNull(store().current.targetPackage)
+        assertTrue("坏值不应导致文件被删", settingsFile().exists())
+    }
+
+    @Test
+    fun `legacy multi-select key is read as first item only`() {
+        // 多选时代的旧键：**只读兼容取首项**（2026-09-18 单选化后不再写入）
+        settingsFile().writeText(
+            """{"target_packages": ["com.bmystu.peng.gw", "com.bmystu.peng.mi"]}""",
+            Charsets.UTF_8,
+        )
+        assertEquals("com.bmystu.peng.gw", store().current.targetPackage)
+
+        // 旧键里的坏项同样要能容忍：null 丢弃、非字符串转文本
+        settingsFile().writeText("""{"target_packages": [null, 3]}""", Charsets.UTF_8)
+        assertEquals("3", store().current.targetPackage)
+
+        settingsFile().writeText("""{"target_packages": {"not": "a list"}}""", Charsets.UTF_8)
+        assertNull(store().current.targetPackage)
+    }
+
+    @Test
+    fun `new single key wins over legacy key`() {
+        settingsFile().writeText(
+            """{"target_packages": ["old.one"], "target_package": "new.one"}""",
+            Charsets.UTF_8,
+        )
+        assertEquals("new.one", store().current.targetPackage)
     }
 }

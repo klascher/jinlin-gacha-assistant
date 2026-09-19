@@ -7,8 +7,13 @@ import java.util.Locale
 /**
  * App 内观测日志缓冲（对应 `mobile/docs/07-App观测面板与录包入口设计.md` §3.2）。
  *
- * 进程级单例：每个事件「先 logcat、再入内存环形缓冲」双写，供 MainActivity 的日志区
- * 轮询展示。写方含 tun 读线程、各 socket 读线程、reassembly worker、录包写线程 →
+ * 进程级单例：每个事件「先 logcat、再入内存环形缓冲」双写。
+ *
+ * ⚠️ **2026-09-18 就地更正**：原句写「供 MainActivity 的日志区轮询展示」，但**该日志区已随
+ * View 版 UI 一并移除** —— `MainActivity` 现只剩 Compose 壳（`setContent { JinlinApp() }`），
+ * 全仓**已无 `snapshot()` 的调用者** ⇒ 内存环**当前没有读者**，logcat 是唯一即时出口；
+ * 环的**唯一预定消费者**是 U11 的 `diagnose` 目录下同名 .txt 落盘器（`10-去重模块设计.md` §16.4）。
+ * 写方含 tun 读线程、各 socket 读线程、reassembly worker、录包写线程 →
  * 内部全部 synchronized。
  *
  * 上限 [MAX_LINES] 行，超出丢最旧。绝不在每包路径打日志——所有打点均为「事件一次性」或

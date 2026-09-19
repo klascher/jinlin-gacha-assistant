@@ -39,16 +39,30 @@
     <string name="settings_section_maintenance">数据维护</string>
     <string name="settings_section_about">关于</string>
 
-    <!-- 抓包组（只读项） -->
+    <!-- 抓包组（运行状态/已知端点为只读；接管范围 2026-09-18 起可点，见 TargetPackagesDialog） -->
     <string name="settings_capture_status">运行状态</string>
     <string name="settings_capture_scope">接管范围</string>
-    <string name="settings_scope_value">仅《夜幕之下》</string>
+    <string name="settings_scope_auto">自动检测</string>
+    <string name="settings_scope_selected">已选 %1$s</string>
     <string name="settings_known_endpoints">已知端点</string>
     <string name="settings_endpoints_identifying">正在识别…</string>
     <string name="settings_endpoint_confirmed">%1$s（已确认）</string>
     <string name="settings_status_idle">未抓包</string>
     <string name="settings_status_running">抓包中</string>
     <string name="settings_status_recording">录包中</string>
+
+    <!-- 接管范围弹窗（渠道服支持，2026-09-18） -->
+    <string name="target_packages_title">接管范围</string>
+    <string name="target_packages_hint">选择要接管的游戏，只能选一个。官服与渠道服包名不同 —— 同时接管两个会让两边的抽卡数据串在一起；改动在下次开始抓包时生效。</string>
+    <string name="target_packages_scanning">正在检测已安装的游戏…</string>
+    <string name="target_packages_empty">未检测到可接管的游戏。请确认《夜幕之下》已安装并重启本应用后再试。</string>
+    <string name="target_packages_save">保存</string>
+    <string name="target_packages_saved">接管范围已保存，下次抓包生效</string>
+    <string name="channel_need_pick">检测到多个渠道，请先在「接管范围」中选择一个</string>
+    <string name="channel_switch_title">数据可能混淆</string>
+    <string name="channel_switch_body">当前用户「%1$s」已抓过 %2$s 的数据。继续抓 %3$s 会把两个渠道的记录混进同一份历史，保底与统计会不准。\n\n建议先到「统计 → 用户管理」切换或新建用户，再回来抓包。</string>
+    <string name="channel_switch_proceed">仍要继续</string>
+    <string name="channel_switch_saved_warn">已保存。注意：当前用户抓过 %1$s 的数据，继续抓会把两个渠道混在一起（保底与统计会不准）。</string>
 
     <!-- 数据互通组 -->
     <string name="settings_export">导出记录</string>
@@ -73,6 +87,33 @@
     <!-- 数据维护组（「未映射 ID」行已于 2026-09-14 移除，只在抓包页保留，见 09 §12.2） -->
     <string name="settings_clear_data">清理本地数据</string>
 
+    <!-- ===== 数据清理子页（U4，2026-09-17 落地；设计见 09 §3.5 / §15） ===== -->
+    <string name="clean_title">数据清理</string>
+    <string name="clean_summary_label">可清理</string>
+    <string name="clean_summary_value">共 %1$d 项 · %2$s</string>
+    <string name="clean_scanning">扫描中…</string>
+    <string name="clean_boundary_note">只清理「副本」与「诊断文件」；抽卡记录本身不在此页删除（请到统计页按账号清空）。</string>
+    <string name="clean_need_stop_banner">抓包进行中：为避免删到正在写入的文件，请先停止抓包。</string>
+    <string name="clean_section_kinds">可清理内容</string>
+    <string name="clean_kind_backup">抽卡数据备份</string>
+    <string name="clean_kind_records">录包文件</string>
+    <string name="clean_kind_diagnose">诊断包</string>
+    <string name="clean_kind_cache">元数据缓存</string>
+    <string name="clean_kind_empty">无文件</string>
+    <string name="clean_kind_summary">%1$d 项 · %2$s</string>
+    <string name="clean_select_all">全选（已选 %1$d / %2$d）</string>
+    <string name="clean_action_delete_n">删除选中（%1$d 项）</string>
+    <string name="clean_action_delete">删除</string>
+    <string name="clean_confirm_title">删除确认</string>
+    <string name="clean_confirm_body_backup">将删除 %1$d 份抽卡数据备份，释放约 %2$s。\n\n这些备份删除后无法找回。\n\n抽卡记录本身不受影响，此处只删除副本。</string>
+    <string name="clean_confirm_body_other">将删除 %1$d 项，释放约 %2$s。\n\n此操作不可恢复。</string>
+    <string name="clean_confirm_cache_note">删除后，下次打开相关页面会自动重新生成。</string>
+    <string name="clean_item_backup_detail">%1$d 条 · %2$s</string>
+    <string name="clean_footer_note">备份保留上限：最近 %1$d 份、总大小 %2$s —— 超出部分由程序自动从最旧的开始清理，但最新一份永不删。还原点列表只显示当前账号，本页可看到全部账号。</string>
+    <string name="clean_toast_done">已删除 %1$d 项，释放 %2$s</string>
+    <string name="clean_toast_partial">%1$d 项已删除（释放 %2$s），%3$d 项失败</string>
+    <string name="clean_toast_still_running">正在抓包，已取消删除</string>
+
     <!-- 关于组 + 页脚 -->
     <string name="settings_app_version">应用版本</string>
     <string name="settings_version_value">%1$s (%2$d)</string>
@@ -84,7 +125,8 @@
     <string name="stats_title">统计</string>
     <string name="stats_section_users">用户管理</string>
     <!-- 运行中提示（§3.78 口径：统计取停止后全量，抓包中为已落库历史） -->
-    <string name="stats_running_hint">抓包进行中，停止后更新</string>
+    <string name="stats_running_hint">抓包进行中 · 下面显示的是上次抓完的数据；停止抓包后才会更新</string>
+    <string name="stats_last_capture">截至 %1$s</string>
     <!-- 封面摘要行（对齐 PC PityPanel 顶部） -->
     <string name="stats_summary_total">总抽数</string>
     <string name="stats_summary_six">6星</string>
@@ -135,14 +177,117 @@
     <string name="account_clear_history">清空当前账号历史</string>
     <string name="account_restore_history">还原抽卡数据</string>
     <string name="account_need_stop">请先停止抓包</string>
+    <!-- 「删除」按钮没有 ActionRow 的尾注位，故用一行小字说明为什么置灰（2026-09-19）：
+         删除的是**活动账号**，而本场记录/Δ 基准/落库目标在开抓那刻已绑定到它。
+         刻意只提删除 —— 新建 / 重命名不改 activeId，抓包中仍可用。 -->
+    <string name="account_delete_need_stop">抓包中不可删除账号，请先停止抓包</string>
     <string name="account_action_restore">还原</string>
     <string name="account_clear_warning">将删除「%1$s」的全部本地抽卡历史，并丢弃本场已抓的记录。\n\n清空前会自动备份，可在「还原抽卡数据」中找回（最多保留最近 %2$d 份）。\n\n此操作不可撤销。</string>
     <string name="account_restore_dialog_title">选择还原点</string>
-    <string name="account_restore_empty">当前账号暂无可用备份。\n\n备份会在每次「清空当前账号历史」时自动生成。</string>
+    <string name="account_restore_empty">当前账号暂无可用备份。\n\n备份会在「清空当前账号历史」「还原抽卡数据」时自动生成；一次抓包会话结束且有新增记录时也会生成一份。</string>
     <string name="account_restore_warning">将用「%1$s」覆盖当前历史。\n\n当前历史会先另存为一份备份，可反复还原。</string>
     <string name="account_toast_cleared_backed_up">已清空，旧数据已备份</string>
     <string name="account_toast_cleared">已清空（此前无历史，未产生备份）</string>
     <string name="account_toast_clear_failed">清空失败，请查看日志</string>
     <string name="account_toast_restored">已还原到 %1$s</string>
     <string name="account_toast_restore_failed">还原失败，请查看日志</string>
+
+    <!-- ===== U5 数据健康指示（2026-09-18 落码；设计见 10 号稿 §17 / 08 号稿 §5.1） =====
+         文案三条硬规则：① 缺口只说「第 N 页」，绝不出现 offset；
+         ② 「第 1 页」必须补注「（最新那一页）」；
+         ③ 交接/补救类文案不得写「退出记录页重进」（页缓存，无效），只能指向重新登录。 -->
+
+    <!-- 抓包页：实时状态条 -->
+    <string name="live_title">实时抓取</string>
+    <string name="live_elapsed">已持续 %1$s</string>
+    <string name="live_count">已收 %1$d 条（本次读取 %2$d 条）</string>
+    <string name="live_pages">已拿 %1$d/%2$d 页</string>
+    <string name="live_reason_uncollected">尚未读到任何抽卡数据</string>
+    <string name="live_reason_wrong_list">在非「全部卡池」视图翻，数据会被丢弃</string>
+    <string name="live_reason_no_data">已识别「全部卡池」，但尚未读到记录</string>
+    <string name="live_reason_head_gap">缺第 %1$s 页（最新那一页），继续翻也拿不到</string>
+    <string name="live_reason_mid_gap">有 %1$d 页中途没读到，翻回去就能补上</string>
+    <string name="live_reason_tail_gap">还差 %1$d 页没翻到，继续翻到底更完整</string>
+    <string name="live_reason_unclear">本场没翻到历史区，新旧数据的衔接未校验</string>
+    <string name="live_reason_none">正在收录</string>
+    <string name="live_fix_wrong_list">请切到『全部卡池』列表后再逐页翻（其它视图的数据不会收录）</string>
+    <string name="live_fix_no_data">若在「全部卡池」翻页仍为 0，请检查抓包是否正常</string>
+    <string name="live_fix_head_gap">这一页「继续抓」也拿不到——有缓存，本次登录不会再请求它。要补上只能：先停止抓包 → 重新登录游戏 → 先开抓包，再进「抽卡记录」从第 1 页翻到底</string>
+    <string name="live_fix_mid_gap">回到「全部卡池」，翻回该页补一次即可</string>
+    <string name="live_fix_unclear">下次多翻一页，让两批数据有交集即可校验衔接</string>
+
+    <!-- 停止确认弹窗（§17.6；按钮只承诺 App 做得到的事——重登是游戏侧动作，留在正文里） -->
+    <string name="stop_title">本次数据可能不完整</string>
+    <string name="stop_ok_title">要停止抓包吗？</string>
+    <string name="stop_ok_body">本次已抓到 %1$d 条，停止后会写入记录。</string>
+    <string name="stop_head_title">缺第 %1$s 页（最新那一页）</string>
+    <string name="stop_head_cause">原因：这一页在你点「开始抓包」之前就加载了。</string>
+    <string name="stop_head_howto">它「继续抓」也拿不到——有缓存，本次登录不会再请求它。要补上只能重来一次：</string>
+    <string name="stop_head_step1">先点【停止抓包】（本场记录先落库成历史）</string>
+    <string name="stop_head_step2">完全退出游戏，重新登录</string>
+    <string name="stop_head_step3">先【开始抓包】，再进「抽卡记录」→ 切到「全部卡池」→ 从第 1 页翻到底</string>
+    <string name="stop_head_fallback">重登后仍缺：到「记录」页导出诊断报告并发送反馈。</string>
+    <string name="stop_mid_title">还差 %1$d 页（第 %2$s 页）</string>
+    <string name="stop_mid_cause">中途有几页没读到（限流），翻回去就能补上。</string>
+    <string name="stop_mid_step1">点「继续抓」</string>
+    <string name="stop_mid_step2">回到「全部卡池」，翻到第 %1$s 页，一直往下翻到第 %2$s 页</string>
+    <string name="stop_mid_fallback">翻完再停止。若一直读不到：到「记录」页导出诊断报告并发送反馈。</string>
+    <string name="stop_btn_stop">停止抓包</string>
+    <string name="stop_btn_continue">继续抓</string>
+    <string name="stop_btn_continue_rec">继续抓（推荐）</string>
+    <string name="stop_btn_stop_anyway">仍然停止</string>
+
+    <!-- 首次引导卡（§17.7；落点 = 首次进入抓包页） -->
+    <string name="guide_title">第一次用？顺序很关键</string>
+    <string name="guide_step1">先点「开始抓包」</string>
+    <string name="guide_step2">再进游戏的「抽卡记录」→ 切到「全部卡池」</string>
+    <string name="guide_step3">从第 1 页往下翻到底；翻完回 App 点「停止抓包」</string>
+    <string name="guide_note">顺序反了会漏掉第 1 页（最新那一页）——它在你进记录页的瞬间就被加载了，抓包没开就抓不到。</string>
+    <string name="guide_dismiss">不再提示</string>
+
+    <!-- 记录页：顶部三行（§17.12.4；标签定宽两个字、不用冒号） -->
+    <string name="record_label_total">总计</string>
+    <string name="record_label_last">上次</string>
+    <string name="record_label_now">本次</string>
+    <string name="record_total_value">%1$d 条</string>
+    <string name="record_last_none">暂无记录</string>
+    <string name="record_last_value">%1$s · %2$d 条</string>
+    <string name="record_now_idle">未在抓包</string>
+    <string name="record_now_value">抓包中 · %1$s 开始 · %2$d 条</string>
+
+    <!-- 记录页：数据完整性卡（三态） -->
+    <string name="health_card_ok">数据完整</string>
+    <string name="health_card_ok_detail">已拿 %1$d/%2$d 页，未发现缺口</string>
+    <!-- 「已与历史衔接」时**三处落点共用**的页覆盖句（本场翻 N 页 / 另 M 页历史中已有）：
+         抓包页实时卡 · 记录页完整性卡 · 完整性子页。刻意不叫 `health_card_*` —— 它不是卡片专用。
+         为什么不能显示「已拿 N/共 M 页」：用户会把它读成「还差 M−N 页没拿完」（2026-09-19 实机反馈
+         的原话），而那 M−N 页其实**全在历史里**，继续翻只是复阅旧数据。 -->
+    <string name="health_pages_covered">本场翻 %1$d 页 · 已接上历史，另 %2$d 页历史中已有</string>
+    <string name="health_covered_title">已接上历史 · 未见的页历史中已有</string>
+    <string name="health_covered_note">本场翻 %1$d 页就与历史重叠 —— 还没翻的 %2$d 页都是历史里的旧记录，不用再翻。</string>
+    <string name="health_covered_optional">继续往下翻只是复阅历史，不会产生新记录（除非你怀疑历史本身缺页）。</string>
+    <string name="health_card_gap">数据可能不完整</string>
+    <string name="health_card_problem">数据有缺口</string>
+    <string name="health_card_uncollected">本场没抓到抽卡数据</string>
+    <string name="health_card_uncollected_detail">请确认已切到「全部卡池」再翻页</string>
+    <string name="health_card_view">查看 ▸</string>
+
+    <!-- 记录页：数据完整性子页 -->
+    <string name="health_title">数据完整性</string>
+    <string name="health_back">返回</string>
+    <string name="health_big_server">服务器权威</string>
+    <string name="health_big_local">已落库</string>
+    <string name="health_big_diff">差</string>
+    <string name="health_big_note">「服务器权威」＝游戏内该账号的总抽数</string>
+    <string name="health_sec_gap">缺口 · %1$d 页</string>
+    <string name="health_gap_head">缺第 %1$s 页（最新那一页）—— 继续翻拿不到，只能重新登录</string>
+    <string name="health_gap_mid">缺第 %1$s 页 —— 翻回去就能补</string>
+    <string name="health_gap_tail">缺第 %1$s 页 —— 继续往下翻</string>
+    <string name="health_cov">已拿 %1$d/%2$d 页</string>
+    <string name="health_no_gap">未发现缺口</string>
+    <string name="health_sec_scan">本场扫描范围</string>
+    <string name="health_scan_value">offset %1$d – %2$d</string>
+    <string name="health_sec_time">本场时间</string>
+    <string name="health_advice_head">补救：先【停止抓包】，再完全退出游戏重新登录；然后先开抓包，再进「抽卡记录」从第 1 页翻到底。</string>
+    <string name="health_advice_other">回到「全部卡池」，把上面列出的页翻出来，再重新抓一次。</string>
 </resources>

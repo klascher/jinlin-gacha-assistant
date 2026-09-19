@@ -19,6 +19,17 @@ import com.jinlin.gacha.assistant.core.SEQ_MOD
  * TCP 因果序保证「请求先于其响应入队」。所以视图追踪**必须与记录消费同线程**，
  * 不能另起线程——否则收到响应时 seq→view 表可能尚未登记。
  *
+ * ### 增量计数（U5，2026-09-18）
+ *
+ * [seenMin] / [seenMax] / [seenCount] 三个计数器与 [seenPages] **同源同步维护**，
+ * 目的是让抓包页的实时三态判据拿到 **O(1)** 的「有没有首屏缺口 / 翻了几页」——
+ * [missingPages] 是 O(N)（要遍历应有页），每页都调会随历史增长而变慢，不能上热路径。
+ *
+ * ⚠️ **两个真相必须一致**：增量值与对 [seenPages] 现算的结果由
+ * `GapClassifyTest` 的 `incremental counters stay equal to recomputed values`
+ * 守卫（随机 200 次 [noteResponse] 后逐项断言相等）——这是「增量维护」这种写法唯一
+ * 会出事的地方（登记时漏更新 / 重复响应重复计数）。
+ *
  * 纯 JVM、零 Android 依赖。
  */
 class ViewTracker {
@@ -37,6 +48,17 @@ class ViewTracker {
     /** 已成功拿到数据的 `(view, offset)` 页集合（被拒页不计入）。 */
     private val seenPages = mutableSetOf<Pair<String, Int>>()
 
+    // —— 增量计数（U5）：只被 [noteResponse] 与 [reset] 改写，只读出口见下面三个访问器 ——
+
+    /** 视图 -> 已见页中最小 offset。 */
+    private val seenMin = mutableMapOf<String, Int>()
+
+    /** 视图 -> 已见页中最大 offset。 */
+    private val seenMax = mutableMapOf<String, Int>()
+
+    /** 视图 -> 已见页数（按 offset 去重，重复响应不重复计数）。 */
+    private val seenCount = mutableMapOf<String, Int>()
+
     /** 最近一次请求的视图；null = 尚未抓到任何切池请求。 */
     val current: String? get() = currentView
 
@@ -48,6 +70,20 @@ class ViewTracker {
 
     /** 已见页集合（只读副本）。 */
     val seen: Set<Pair<String, Int>> get() = seenPages.toSet()
+
+    /**
+     * 本视图已见页中**最小** offset；该视图一页都没见时为 null。
+     *
+     * 用途：`minSeenOffset > 0` 即「缺了比它更小的页」，而应有页从 0 起连续 ⇒
+     * 必是**首屏缺口**（A 类，成因=开抓前该页已加载）。这是抓包页 O(1) 判据的根。
+     */
+    fun minSeenOffset(view: String): Int? = seenMin[view]
+
+    /** 本视图已见页中**最大** offset；该视图一页都没见时为 null（尾部缺口的边界）。 */
+    fun maxSeenOffset(view: String): Int? = seenMax[view]
+
+    /** 本视图已见页数（按 offset 去重）。「已拿 N/M 页」里的 N。 */
+    fun seenPageCount(view: String): Int = seenCount[view] ?: 0
 
     /**
      * 处理一条 C→S 请求帧：登记 `seq%127 -> (view, offset)` 并更新当前视图。
@@ -96,7 +132,14 @@ class ViewTracker {
             // 「这一页已拿到数据」——缺口报告据此与应有页相减。
             if (resolved != null) {
                 if (resp.total > 0) viewTotals[resolved] = resp.total
-                if (resp.offset >= 0) seenPages.add(resolved to resp.offset)
+                // 先判「是否新增」再维护增量计数：同一页被重复响应时（限流重发后补上、
+                // 或客户端重请）**不得**把 seenCount 加两次、也不该动 min/max。
+                // `Set.add` 的返回值正是这个判据，与 seenPages 天然同源。
+                if (resp.offset >= 0 && seenPages.add(resolved to resp.offset)) {
+                    seenMin[resolved] = minOf(seenMin[resolved] ?: resp.offset, resp.offset)
+                    seenMax[resolved] = maxOf(seenMax[resolved] ?: resp.offset, resp.offset)
+                    seenCount[resolved] = (seenCount[resolved] ?: 0) + 1
+                }
             }
             return null
         }
@@ -112,6 +155,8 @@ class ViewTracker {
      * 由「权威 total + 每页 5 条」（B4）推算应有页，再减去已成功响应的页。
      * 用途：收尾时明确告诉用户「还缺哪几页」——这是「仅采纳全部卡池」（B8）后
      * 失去多视图冗余的**唯一兜底**。
+     *
+     * ⚠️ **O(应有页数)`，不要放进每页都会走的路径**（抓包页实时态请用三个增量访问器）。
      *
      * @param view 只报告该视图；null 表示报告全部有 total 的视图
      * @return 按视图标识升序排列的报告；无缺口（或该视图无权威 total）时为空
@@ -146,6 +191,54 @@ class ViewTracker {
         rejected.clear()
         viewTotals.clear()
         seenPages.clear()
+        seenMin.clear()
+        seenMax.clear()
+        seenCount.clear()
+    }
+
+    companion object {
+
+        /**
+         * 把「应有页 − 已见页」按**位置**分成三类（U5 §17.3 的核心设计）。
+         *
+         * 三类缺口的成因与补救动作完全不同，混在一起报会让用户做无用功：
+         *
+         * | 类 | 判据 | 成因 | 补救 |
+         * |---|---|---|---|
+         * | **A 首屏** | 缺口 offset **小于**已见页的最小 offset | 开抓前该页已加载（页缓存，本次登录不会再请） | **停止 → 重新登录 → 先开抓包再进记录页** |
+         * | **B 中段** | 夹在已见 offset **中间** | 跳页翻 / 某页被限流没补上 | 翻回该页即可（客户端会重发） |
+         * | **C 尾部** | 缺口 offset **大于**已见页的最大 offset | 没翻到底 | 继续往下翻 |
+         *
+         * ⚠️ **一页都没见时（`seen` 与 expected 无交集）全部归 [GapSummary.mid]** ——
+         * 既无最小也无最大，无法证明是首屏还是尾部，**不臆断**。调用方须先处理
+         * 「未采集到判据」态（见 `HealthState.UNCOLLECTED`）。
+         *
+         * ⚠️ 本函数是 **O(N)**（N = 应有页数），只在停抓 / 打开面板 / 单测时调用；
+         * 抓包页的实时判据一律走 [minSeenOffset] 等增量访问器。
+         *
+         * @param expected 应有页 offset 升序列表（[ViewIdentity.expectedPageOffsets]）
+         * @param seen 已见页 offset 集合（同一视图内）
+         */
+        fun classifyGap(expected: List<Int>, seen: Set<Int>): GapSummary {
+            val missing = expected.filter { it !in seen }
+            if (missing.isEmpty()) return GapSummary(emptyList(), emptyList(), emptyList(), emptyList())
+
+            val seenInExpected = expected.filter { it in seen }
+            val minSeen = seenInExpected.minOrNull()
+            val maxSeen = seenInExpected.maxOrNull()
+
+            val head = mutableListOf<Int>()
+            val mid = mutableListOf<Int>()
+            val tail = mutableListOf<Int>()
+            for (o in missing) {
+                when {
+                    minSeen != null && o < minSeen -> head.add(o)
+                    maxSeen != null && o > maxSeen -> tail.add(o)
+                    else -> mid.add(o)
+                }
+            }
+            return GapSummary(missing = missing, head = head, mid = mid, tail = tail)
+        }
     }
 }
 
@@ -156,3 +249,24 @@ data class MissingPages(
     val seenCount: Int,
     val expectedCount: Int,
 )
+
+/**
+ * 缺口三分类结果（镜像 [ViewTracker.classifyGap]）。四组 offset 均为升序。
+ *
+ * [missing] 是三者的并集（保序：应有页升序）；按位置切片后**三者互斥且覆盖全部缺失**。
+ */
+data class GapSummary(
+    /** 全部缺失 offset（升序）= [head] + [mid] + [tail]。 */
+    val missing: List<Int>,
+    /** A 类：首屏缺口（早于本场已见的最小 offset）—— 只能靠重新登录补。 */
+    val head: List<Int>,
+    /** B 类：中段空洞（夹在已见 offset 之间）—— 翻回去就能补。 */
+    val mid: List<Int>,
+    /** C 类：尾部未翻（晚于本场已见的最大 offset）—— 继续往下翻。 */
+    val tail: List<Int>,
+) {
+    val hasHead: Boolean get() = head.isNotEmpty()
+    val hasMid: Boolean get() = mid.isNotEmpty()
+    val hasTail: Boolean get() = tail.isNotEmpty()
+    val isEmpty: Boolean get() = missing.isEmpty()
+}

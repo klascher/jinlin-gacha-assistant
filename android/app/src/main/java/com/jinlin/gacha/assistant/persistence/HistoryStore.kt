@@ -25,6 +25,20 @@ data class BackupInfo(
 )
 
 /**
+ * 上一场抓包的明细（U5，2026-09-18）—— 落 `users/<id>.json` 的 `last_capture_detail`。
+ *
+ * @param startedAt 开抓时刻（ISO-8601 本地日期时间，见 `HistoryStore.CAPTURE_DETAIL_FMT`）
+ * @param endedAt 停抓时刻（同一格式）
+ * @param added **该场新增**条数（不是结束时的累计）—— 记录页三行里「上次 / 本次」都回答
+ *   「这段时间新增了多少」；取累计会与「总计」语义重叠，且让两行口径不一致。
+ */
+data class CaptureDetail(
+    val startedAt: String,
+    val endedAt: String,
+    val added: Int,
+)
+
+/**
  * 历史记录持久化 —— Kotlin 镜像 PC `gacha_exporter/storage/history.py::HistoryService` 的
  * **落库部分**（load / merge / clear / 备份 / 还原），落点 `usersDir/<profileId>.json`。
  *
@@ -48,6 +62,22 @@ data class BackupInfo(
  * - **内容幂等**：payload 与磁盘逐结构一致时不写盘、不备份（PC 曾 6 分钟生成 17 个备份）；
  * - **无新增也要落盘**：total 快照必须写下去，否则下次仍按旧基准推 Δ、位置整体错位。
  *
+ * Android 特有的三条补充约定（**2026-09-17 两轮修订**）：
+ * - **还原点 ≠ 每次写盘都留一份**：周期兜底落盘（每 5 秒）走 [merge] 的 `keepRestorePoint = false`，
+ *   **只写历史、不留还原点**；否则备份环约 25 秒即被自动同步刷满，把用户主动产生的还原点
+ *   （清空前 / 还原前 / 停抓收尾）挤出并删除（缺陷与修复见 `09-设置模块设计.md` §15）；
+ * - **裁剪 = 最近 [MAX_BACKUPS] 份 + 字节预算 [BUDGET_BYTES]**（[pruneBackups]）：份数 5 → 30、
+ *   另加 20 MB 软预算（超预算时从最旧删起，但**保底留 1 份**）。**不留「永久锚点」** —— 该设计
+ *   曾短暂实现（保留最早的非空备份），经用户澄清诉求是「回退到**出问题之前**」而非「回到最早」
+ *   后否决：锚点占槽位而收益为零，见 `09-设置模块设计.md` §15 的改判记录；
+ * - **原子写**（[writeAtomic]）：tmp + rename。周期落盘不再留副本后，「写盘中途被杀留下半截
+ *   JSON」失去兜底 —— 而半截 JSON 会被 [load] 静默当成「空历史」，比报错更危险，故从根上消除。
+ *
+ * ⚠️ **写入者唯一性不变量**：本类在工程内有多个实例（`GachaVpnService` 写入 + UI / 统计只读），
+ * 各持一份内存副本、**磁盘文件是唯一汇合点**。规则：**任一时刻只允许一个实例写同一文件，
+ * UI 侧实例一律只读**（当前靠「Service 停抓后置 null」+「清空 / 还原在抓包中置灰」两条约束维持）。
+ * 放开前必须先把写操作收敛到单点或加文件锁 —— 否则会出现**静默漏写 = 丢数据**。
+ *
  * 纯 JVM（只用 [File] + [MiniJson]，不依赖 `Context`）→ 可在 junit 里用临时目录对拍。
  *
  * @param usersDir 账号数据目录（Android：`File(filesDir, "users")`）
@@ -63,24 +93,134 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         private const val KEY_VIEW_TOTALS = "view_totals"
         private const val KEY_TOTAL = "total"
 
+        /**
+         * 停抓时算出的**缺页明细**（U5，2026-09-18）：`{"0@0": [0, 5]}`（视图 → 缺失 offset 数组）。
+         *
+         * 落进**历史文件**（`users/<id>.json`）而不是 `settings.json`，两条理由：
+         * 1. 它是**按账号**的，而历史文件本身就按账号分文件，不需要 profile_id 映射；
+         * 2. PC 读历史只用 `records` / `view_totals` / `total` 三个键，**未知键静默忽略**
+         *    ⇒ 加**新键**零兼容风险（反例：改**已有键的值类型**是另一回事，见 10 号稿 §17.12.3）。
+         *
+         * ⇒ 写入者仍是本类**唯一**，不为一个明细数组引入第二个写盘面。
+         */
+        private const val KEY_SCAN_GAPS = "scan_gaps"
+        /**
+         * 该账号**抓过哪些渠道包**（渠道服支持，2026-09-18）。
+         *
+         * 用途：换渠道时判断「本次渠道是否与该账号历史里的渠道不同」⇒ 提醒用户
+         * 「两个渠道的数据会混进同一份历史、保底与统计会串」。
+         *
+         * 为什么落在**账号级**而不是每条记录里：
+         * 1. `records` schema 保持与 PC **逐字一致**（PC 只读 `records`/`view_totals`/`total`，
+         *    **未知键静默忽略**）⇒ 加这个键**不破坏**「历史文件可互通」；
+         * 2. 渠道是「这个账号在本设备上被抓过的来源」，本就是账号级属性，塞进每条记录纯属冗余。
+         */
+        private const val KEY_SOURCE_PACKAGES = "source_packages"
+
+        /**
+         * 上一场抓包的**明细**（U5，2026-09-18）：`{started_at, ended_at, added}`。
+         *
+         * 不要与 `settings.json` 的 `last_capture` 混为一谈：那个键 **PC 也在用**
+         * （`storage/settings.py:70-96`，值是**单个**时间字符串，PC 拿它显示「最近更新」），
+         * 且 `load_last_capture` 有 `isinstance(val, str)` 守卫 —— 把值升级成对象 PC 不崩，
+         * 但会**静默变空串**，属真兼容问题。本键是**新增**的、只由 Android 读写的内部键，
+         * 两者分属两个文件、互不影响。
+         *
+         * 存在的理由：`last_capture` 只有**一个时刻**（抓包「完成」），既没有开始时刻、
+         * 也没有新增条数 ⇒ 记录页「上次　09-17 21:08–21:31 · 601 条」这三样它一样都给不出。
+         */
+        private const val KEY_LAST_CAPTURE_DETAIL = "last_capture_detail"
+
+        /** 明细里的三个子键（mobile 内部约定）。 */
+        private const val KEY_DETAIL_STARTED_AT = "started_at"
+        private const val KEY_DETAIL_ENDED_AT = "ended_at"
+        private const val KEY_DETAIL_ADDED = "added"
+
         /** 备份 / 历史文件的后缀（解析与拼接共用）。 */
         private const val JSON_SUFFIX = ".json"
 
         private val TS_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+
+        /**
+         * 场次明细的时间格式（ISO-8601 **本地**日期时间，秒级）：`2026-09-18T09:40:12`。
+         *
+         * 为什么存文本而不是 epoch 毫秒：这是**给人看**的时间戳，落盘后直接打开 json 就能读懂，
+         * 且与 `settings.json` 里 PC 那个 `last_capture` 的「格式化字符串」风格一致。
+         * UI 层负责换算成人读的 `09:40–09:58`（跨天补月-日）。
+         */
+        val CAPTURE_DETAIL_FMT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
 
         /** 还原点展示用时间格式（对齐 PC `BackupInfo.label` 的 `%Y-%m-%d %H:%M:%S`）。 */
         private val LABEL_FMT: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
         /**
-         * 备份保留上限（**mobile 特有**，PC 无上限）。
+         * 备份保留**份数**上限（**mobile 特有**，PC 无上限），2026-09-17 由 5 提到 **30**。
          *
          * PC 跑在桌面文件系统、用户可自行清理 users/，故不做裁剪；Android 的备份落在
-         * `filesDir/users/` 私有目录，**用户看不到也删不掉**，若不裁剪会随每次「清空历史」
-         * 无限堆积。故每次生成备份后只保留最近 [MAX_BACKUPS] 份（按文件名时间戳倒序），
-         * 更旧的直接删除。
+         * `filesDir/users/` 私有目录，**用户看不到也删不掉**，若不裁剪会无限堆积。
+         *
+         * 为什么是 30：一份备份约 125 KB（793 条实测），30 份 ≈ 3.7 MB —— 对手机存储是万分之几，
+         * **空间从来不是瓶颈**。真正的瓶颈是「用户的手」（私有目录删不掉），故用算法兜底的同时把
+         * 回退窗口放大到「几个月」，并配合 `设置 → 数据清理` 子页的手动删除（U4）把主动权还给用户。
+         *
+         * ⚠️ 上限是**软**的：须同时满足份数与 [BUDGET_BYTES]，且**刚生成的那份永不删**（见 [pruneBackups]）。
          */
-        const val MAX_BACKUPS: Int = 5
+        const val MAX_BACKUPS: Int = 30
+
+        /**
+         * 备份总字节预算（20 MB，**mobile 特有**），与 [MAX_BACKUPS] 取**先到者**。
+         *
+         * 为什么需要它：**份数是不可靠的代理** —— 10 份可能是 1 MB，也可能是 50 MB（取决于历史
+         * 条数）。只按份数裁，遇到「历史暴涨」时占用会失控；按字节算才真正可控。
+         *
+         * 量级参考（按实测 159 B/条）：793 条 ≈ 125 KB（30 份 ≈ 3.75 MB，余量 5 倍）；
+         * 约 4,400 条 ≈ 700 KB（30 份 ≈ 21 MB，**刚好触到预算**）；约 20,000 条 ≈ 3.2 MB
+         * （30 份 ≈ 96 MB ⇒ 实际只能留 6 份）。
+         *
+         * ⚠️ 同样**不严格**：若单份历史本身超过预算（需 > 13 万条），删到只剩 1 份仍超预算则
+         * **停手认超**（[pruneBackups] 的保底支）。详见 `09-设置模块设计.md` §15。
+         */
+        const val BUDGET_BYTES: Long = 20L * 1024 * 1024
+
+        /**
+         * 由「新 → 旧」的文件序列算出**保留集**；[pruneBackups] 调用它，单测也直接测它。
+         *
+         * 抽成纯函数（收尺寸、不摸 IO）的原因：预算规则是本批的核心逻辑，而 20 MB 的量级让
+         * 「靠写大文件触发裁剪」的集成测试不划算（要往临时目录写 20 MB+）。传入尺寸即可精确构造
+         * 「份数没超、只有预算超」与「单份就超预算」这些边界，不产生任何磁盘代价。
+         *
+         * @param entries 已按**新 → 旧**排序的 `(文件, 字节)`；第 0 项即「刚生成的那份」
+         * @param maxBackups 份数上限
+         * @param budgetBytes 总字节预算
+         * @param protected 额外必须保住的一份（[restore] 传刚被使用的还原点；不在 [entries] 时
+         *   按 0 字节计，不影响预算判定）
+         */
+        internal fun keepSet(
+            entries: List<Pair<File, Long>>,
+            maxBackups: Int,
+            budgetBytes: Long,
+            protected: File? = null,
+        ): Set<File> {
+            if (entries.isEmpty()) return emptySet()
+            val sizeOf = HashMap<File, Long>(entries.size)
+            for ((f, n) in entries) sizeOf[f] = n
+
+            val keep = LinkedHashSet<File>()
+            keep += entries.first().first // 刚生成的（或最新的一份）：任何情况下都不删
+            protected?.let { keep += it }
+
+            var bytes = keep.sumOf { sizeOf[it] ?: 0L }
+            for ((f, n) in entries) {
+                if (f in keep) continue
+                if (keep.size >= maxBackups) break // 份数已满
+                if (bytes + n > budgetBytes) break // 再收它就超预算（含「保底 1 份仍超」的认超支）
+                keep += f
+                bytes += n
+            }
+            return keep
+        }
     }
 
     private val historyFile = File(usersDir, "$profileId.json")
@@ -92,6 +232,35 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
     /** 最近一次 [merge] 的详细诊断（供调用方报警消费）；未合并过为 null。 */
     var lastReport: MergeReport? = null
         private set
+
+    /** 磁盘上最近一次停抓的缺页明细（视图 → 缺失 offset 升序）；空 = 无缺口或从未停抓过。 */
+    private var loadedScanGaps: Map<String, List<Int>> = emptyMap()
+
+    /** 该账号抓过的渠道包（账号级；见 [KEY_SOURCE_PACKAGES]）。 */
+    private var loadedSourcePackages: MutableSet<String> = linkedSetOf()
+
+    /** 磁盘上最近一次停抓的场次明细；null = 从未停抓过（记录页显示「上次　暂无记录」）。 */
+    private var loadedCaptureDetail: CaptureDetail? = null
+
+    /**
+     * 最近一场**已落库**抓包的明细（记录页「上次」行用）；从未停抓过为 null。
+     *
+     * ⚠️ 它**不随周期落盘更新** —— 只由停抓收尾那条 [merge] 写入。否则「上次」会显示成
+     * 「正在进行中的这一场」，且结束时刻每 5 秒跳一次（与「周期落盘不留还原点」同一类坑：
+     * 周期性写入不能承担状态点语义）。
+     */
+    val captureDetail: CaptureDetail? get() = loadedCaptureDetail
+
+    /**
+     * 最近一次停抓算出的缺页明细（视图 → 缺失 offset 数组，升序）。
+     *
+     * ⚠️ offset 是**内部 / 落盘 / PC 对齐**口径；面向用户的文案一律由 UI 层换算成
+     * 「第 N 页」（`第 N 页 = offset / PAGE_SIZE + 1`，第 1 页 = 最新），见 10 号稿 §18.3。
+     */
+    val scanGaps: Map<String, List<Int>> get() = LinkedHashMap(loadedScanGaps)
+
+    /** 该账号抓过的渠道包（副本；用于「换渠道是否会混数据」的判断与展示）。 */
+    val sourcePackages: Set<String> get() = LinkedHashSet(loadedSourcePackages)
 
     /** 当前历史记录（按 timestamp 倒序；副本，改动请走 [merge]）。 */
     val records: List<GachaRecord> get() = loaded.toList()
@@ -119,6 +288,9 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         loaded = mutableListOf()
         loadedTotals.clear()
         loadedTotal = null
+        loadedScanGaps = emptyMap()
+        loadedSourcePackages = linkedSetOf()
+        loadedCaptureDetail = null
         lastReport = null
         if (!historyFile.exists()) return
 
@@ -138,6 +310,12 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
             toInt(v)?.let { loadedTotals[k.toString()] = it }
         }
         loadedTotal = toInt(map[KEY_TOTAL])
+        loadedScanGaps = toGapMap(map[KEY_SCAN_GAPS])
+        // 渠道标记（账号级，未知/坏值一律降级成空集 —— 与既有「手改坏不该起不来」契约一致）
+        loadedSourcePackages = (map[KEY_SOURCE_PACKAGES] as? List<*>)
+            ?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }
+            ?.toMutableSet() ?: linkedSetOf()
+        loadedCaptureDetail = toCaptureDetail(map[KEY_LAST_CAPTURE_DETAIL])
         backfillTotalIfComplete()
     }
 
@@ -147,13 +325,45 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
      * @param sessionRecords 本次会话新增（已由 `SessionDedup` 归一化到历史坐标系）
      * @param viewTotals 本次会话的 `{视图: 权威 total}` 快照；其中「全部卡池」的值成为
      *   下次合并的 Δ 基准
+     * @param keepRestorePoint 是否在写盘前留一份还原点（默认 `true` = 既有行为）。
+     *   **只影响「是否留还原点」，不影响落盘** —— 传 `false` 时历史照写，只是不产生备份，
+     *   故「进程被杀不丢数据」的兜底能力不受影响。周期落盘必须传 `false`（见 `09 §15`）。
+     *   唯一例外：主文件损坏不可读时**无条件**留档（保命，不走本参数）。
+     * @param scanGaps 本场停抓算出的缺页明细（视图 → 缺失 offset）。**null = 不改动** ——
+     *   周期落盘（5 秒一次）必须走 null，否则「上次抓包的缺口」会被正在进行中的场次刷掉；
+     *   传**空 map** 是有效语义（本场无缺口 ⇒ 清掉上次的明细），与 null 不同。
+     * @param captureStartedAt 本场**开抓**时刻（ISO-8601 本地日期时间，见 [CAPTURE_DETAIL_FMT]）。
+     *   **null = 不改动 `last_capture_detail`**（周期落盘走这条）；只由停抓收尾传值，
+     *   故「上次」永远是**已落库**的那一场。
+     * @param captureEndedAt 本场**停抓**时刻（同格式）。两者必须成对给，缺一不写。
      * @return 落库新增条数（详细诊断见 [lastReport]）
      */
-    fun merge(sessionRecords: List<GachaRecord>, viewTotals: Map<String, Int> = emptyMap()): Int {
+    fun merge(
+        sessionRecords: List<GachaRecord>,
+        viewTotals: Map<String, Int> = emptyMap(),
+        keepRestorePoint: Boolean = true,
+        scanGaps: Map<String, List<Int>>? = null,
+        captureStartedAt: String? = null,
+        captureEndedAt: String? = null,
+        sourcePackage: String? = null,
+        /**
+         * 会话起点时的历史条数（服务侧传入）—— 仅用于把场次明细的 `added` 算成**本场净增**。
+         *
+         * 不传（null）时退回 [MergeReport.added]（= **本次** merge 的新增）—— 只对「一次 merge
+         * 到底」的调用方正确（单测 / 单次导入）；**抓包路径必须传**，原因见写 `last_capture_detail` 处。
+         */
+        sessionBaselineRecords: Int? = null,
+    ): Int {
         if (viewTotals.isNotEmpty()) {
             for ((k, v) in viewTotals) loadedTotals[k.toString()] = v
         }
         allPoolsTotal()?.let { loadedTotal = it }
+        // U5：两个「停抓才更新」的键。null 与空 map 语义不同，别写反（见上方 @param）。
+        // 场次明细不在这里赋值 —— 它的 `added` 要用下面 report 的结果，见 writePayload 之前。
+        if (scanGaps != null) loadedScanGaps = scanGaps
+        // 渠道标记累加（**只增不减**）：这是「该账号被哪些渠道抓过」的账本，
+        // 换回旧渠道时据此判定「与历史一致 ⇒ 不必提醒」。
+        if (sourcePackage != null) loadedSourcePackages.add(sourcePackage)
 
         val report = PositionAlign.mergeByPosition(loaded, sessionRecords, shift = 0)
         lastReport = report
@@ -167,8 +377,23 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
             loaded.addAll(report.added)
             loaded.sortByDescending { it.timestamp }
         }
+        // U5 场次明细：`added` 取 **merge 真正落库的新增数**，而不是本场收下的 `session.size`
+        // —— session 里可能含与历史重叠、被位置判重吞掉的记录。记录页三行要求
+        // 「上次 + 本次 = 总计」，用 session.size 会凑不上那个等式。
+        if (captureStartedAt != null && captureEndedAt != null) {
+            // ⚠️ `added` 必须取**本场净增**（收尾后总条数 − 会话起点条数），**不能**用 `report.added.size`：
+            // 每 5 秒的 `GachaVpnService.checkpointPersist()` 已把本场记录并进历史 ⇒ 收尾这次 merge
+            // 会把它们全部判重跳过 ⇒ `report.added.size` 恒为 0 ⇒ 记录页「上次」永远显示 0 条
+            //（2026-09-19 实机反馈；与 §3.88「checkpoint 挤占还原点」同一类交叉影响 —— 周期落盘
+            // 与收尾流程的交互没推演全）。
+            val net = sessionBaselineRecords
+                ?.let { (loaded.size - it).coerceAtLeast(0) }
+                ?: report.added.size
+            loadedCaptureDetail = CaptureDetail(captureStartedAt, captureEndedAt, net)
+        }
+
         // 无新增也落盘：total 快照必须写下去，否则下次仍按旧基准推 Δ、位置整体错位
-        writePayload()
+        writePayload(keepRestorePoint)
         return report.added.size
     }
 
@@ -178,14 +403,21 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
      * total 快照一并清空 —— 清空后重新起算 Δ 基准，否则下次合并会按旧基准推出一个巨大的
      * Δ 把新记录位置整体挪错。用于「放弃旧数据、从当前抓取重新积累」。
      *
+     * 清空前**必留还原点**（不传 `keepRestorePoint`，即默认 `true`）—— 这是还原点的主用途。
+     *
      * @return 清空前生成的备份文件；磁盘上无有效历史可备份时为 null
      */
     fun clear(): File? {
         loaded = mutableListOf()
         loadedTotals.clear()
         loadedTotal = null
+        // 明细描述的是「上一场抓包」，而记录已被放弃 —— 留着会让记录页显示
+        // 「上次 601 条」而列表却是空的（两者对不上，用户会以为清空没生效）。
+        loadedScanGaps = emptyMap()
+        loadedSourcePackages = linkedSetOf()
+        loadedCaptureDetail = null
         lastReport = null
-        return writePayload()
+        return writePayload(keepRestorePoint = true)
     }
 
     /**
@@ -238,12 +470,19 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         }
         backup.copyTo(historyFile, overwrite = true)
         load()
-        pruneBackups()
+        // 保护刚被使用的目标：它可能落在保留窗口之外（比如是列表里居中的那份），但用户刚用过它 ——
+        // 裁掉等于「还原完就把这个还原点弄没了」，想再还原一次就找不到了。它只是本轮 [pruneBackups]
+        // 的 keep 成员，不改变 30 份 / 20 MB 的判定口径。
+        pruneBackups(protected = backup)
         return current
     }
 
-    /** 把当前内存状态落库；返回本次生成的备份（无备份时为 null）。 */
-    private fun writePayload(): File? {
+    /**
+     * 把当前内存状态落库；返回本次生成的备份（无备份时为 null）。
+     *
+     * @param keepRestorePoint 见 [merge]。**损坏兜底不受它影响** —— 主文件不可读时无条件留档。
+     */
+    private fun writePayload(keepRestorePoint: Boolean = true): File? {
         if (!usersDir.exists()) usersDir.mkdirs()
         val payload = buildPayload()
 
@@ -257,10 +496,41 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
             if (existing != null && existing == payload) return null // 内容零变化：不写盘、不备份
             val existingRecords = (existing as? Map<*, *>)?.get(KEY_RECORDS)
             val hasRecords = existingRecords is List<*> && existingRecords.isNotEmpty()
-            if (existing == null || hasRecords) backup = backupFile()
+            // 损坏（existing == null）时**无条件**留档：这是「保命」而非「还原点」，不受
+            // keepRestorePoint 影响。该支天然只触发一次 —— 首次写盘即把主文件改写成合法
+            // payload，下一轮 existing != null 且 hasRecords = false ⇒ 不再造备份。
+            // （残余：写盘持续失败时主文件将一直是损坏态 ⇒ 可能反复走该支；此时备份写入本身
+            // 同样大概率失败，属极端场景，不额外加代码。）
+            if (existing == null || (keepRestorePoint && hasRecords)) backup = backupFile()
         }
-        historyFile.writeText(MiniJson.encodePretty(payload, indent = 2), Charsets.UTF_8)
+        writeAtomic(payload)
         return backup
+    }
+
+    /**
+     * 原子写主文件：先写 `<profileId>.json.tmp`，成功后再 rename 覆盖。
+     *
+     * 为什么要原子：写盘中途进程被杀会留下**半截 JSON**，而 [load] 会把不可解析的文件
+     * 静默当成「空历史」（比抛错更危险）。周期落盘不再产生还原点副本（[merge] 的
+     * `keepRestorePoint = false`）后，「写坏时有最近副本兜底」这条路也没了，故从根上消除截断。
+     *
+     * `.tmp` 不匹配备份规约（[parseBackupTs] 要求 `<profileId>_` 前缀 + `.json` 结尾），
+     * 故不会被 [backups] / [uniqueBackupFile] 误认，也不会被 [pruneBackups] 删除。
+     *
+     * rename 失败（目标已存在且平台不支持覆盖式 rename 等）时降级为直接写，并清掉临时文件 ——
+     * 降级路径等价于旧行为，不引入新的失败面。
+     */
+    private fun writeAtomic(payload: Map<String, Any?>) {
+        val text = MiniJson.encodePretty(payload, indent = 2)
+        val tmp = File(usersDir, "$profileId$JSON_SUFFIX.tmp")
+        try {
+            tmp.writeText(text, Charsets.UTF_8)
+            if (tmp.renameTo(historyFile)) return
+        } catch (e: Exception) {
+            // 落到下面的降级分支
+        }
+        historyFile.writeText(text, Charsets.UTF_8)
+        tmp.delete()
     }
 
     /** 构造落库 payload；数值一律用 [Long]，好让「解码已有文件 == 新 payload」的结构判等成立。 */
@@ -279,10 +549,29 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         }
         val totals = LinkedHashMap<String, Any?>()
         for ((k, v) in loadedTotals) totals[k] = v.toLong()
+
+        // 缺页明细：offset 一律转 Long。**这是判等闸成立的前提** —— `writePayload` 里
+        // `existing == payload` 要求「解码已有文件 == 新 payload」逐结构相等，而 MiniJson
+        // 把整数解码成 Long（见 MiniJson 的映射约定）。写成 Int 会让判等永远为假 ⇒
+        // 每次 merge 都写盘 + 造备份，把还原点环刷满。
+        val gaps = LinkedHashMap<String, Any?>()
+        for ((k, v) in loadedScanGaps) gaps[k] = v.map { it.toLong() }
+
+        val detail = loadedCaptureDetail?.let {
+            linkedMapOf<String, Any?>(
+                KEY_DETAIL_STARTED_AT to it.startedAt,
+                KEY_DETAIL_ENDED_AT to it.endedAt,
+                KEY_DETAIL_ADDED to it.added.toLong(),
+            )
+        }
         return linkedMapOf(
             KEY_RECORDS to recs,
             KEY_VIEW_TOTALS to totals,
             KEY_TOTAL to loadedTotal?.toLong(),
+            KEY_SCAN_GAPS to gaps,
+            // 渠道标记（账号级）：数组形式；PC 侧**未知键静默忽略**，互通不受影响
+            KEY_SOURCE_PACKAGES to loadedSourcePackages.sorted(),
+            KEY_LAST_CAPTURE_DETAIL to detail,
         )
     }
 
@@ -318,15 +607,58 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
     }
 
     /**
-     * 裁剪超出 [MAX_BACKUPS] 的旧备份（mobile 特有，见常量注释）。
+     * 裁剪超出保留规则的旧备份（mobile 特有；见 [MAX_BACKUPS] / [BUDGET_BYTES] 的常量注释）。
      *
-     * 只在**新备份生成后**调用，故不会误删刚生成的那份。删除失败静默降级 —— 下轮生成备份
-     * 时会再试，最多多占一点空间，不影响正确性。
+     * **保留集 = 从最新往回取，直到触到任一上限**：份数 ≤ [MAX_BACKUPS] **且** 总字节 ≤
+     * [BUDGET_BYTES]。两条**保底**：刚生成的那份（最新的）**永不删**，[protected] 也永不删。
+     *
+     * 为什么「刚生成的那份永不删」是**必须**的（两条理由缺一不可）：
+     * 1. 备份的全部意义是「还能退回去」——删光 = 还原功能直接消失，与设计目的相反；
+     * 2. 更荒谬的是：本方法发生在**刚生成备份之后**（[backupFile]）。若预算严格生效，刚生成的
+     *    那份会**立刻被自己删掉**，每次清空 / 停抓都白做，还原点列表永远是空的。
+     *
+     * **为什么刻意不设「永久锚点」**（2026-09-17 改判）：曾实现「保留最早的非空备份」，立意是
+     * 「回到装之前」。但用户澄清诉求是**回退到出问题之前**（= 最近的一个健康状态，本就在滚动
+     * 窗口内），而非时间上最早的那份；而锚点会实打实占掉一个槽位（当时上限 5 份，占 1 个 ⇒
+     * 可回退步数从 5 降到 4）。⇒ 去掉。改判记录见 `09-设置模块设计.md` §15。
+     *
+     * **不解析备份内容**：只按「文件名时间戳」排序 + `File.length()` 求和。原实现在裁剪时要
+     * 解析整份备份（为判断 `records > 0` 那个锚点），是写放大的隐形大头；去掉锚点后这步自然消失，
+     * 条数只在 UI 展示（[backups]）时才解析。
+     *
+     * 只在**新备份生成后**（[backupFile]）或**还原完成后**（[restore]）调用。删除失败静默降级 ——
+     * 下轮生成备份时会再试，最多多占一点空间，不影响正确性。
+     *
+     * @param protected 本次必须保住的那一份：[restore] 传刚被使用的还原点（它可能落在保留窗口
+     *   之外，但「还原完就把这个还原点弄没了」会让用户无法再还原一次）。
      */
-    private fun pruneBackups() {
-        val all = backups()
-        if (all.size <= MAX_BACKUPS) return
-        all.drop(MAX_BACKUPS).forEach { it.file.delete() }
+    private fun pruneBackups(protected: File? = null) {
+        val all = backupFilesNewestFirst() // 新 → 旧（只看文件名与时间戳，不读内容）
+        if (all.isEmpty()) return
+        val entries = all.map { it to it.length() }
+        if (entries.size <= MAX_BACKUPS && entries.sumOf { it.second } <= BUDGET_BYTES) return
+
+        val keep = keepSet(entries, MAX_BACKUPS, BUDGET_BYTES, protected)
+        all.filter { it !in keep }.forEach { it.delete() }
+    }
+
+    /**
+     * `usersDir` 下所有**合规备份**，按备份时刻**新 → 旧**（同秒以 `_N` 为次级键，N 大者更新）。
+     *
+     * 与 [backups] 的区别：本方法**不读文件内容**（不统计条数），只做裁剪所需的排序 ——
+     * 裁剪不需要知道每份几条，只看大小，故省掉 30 次 JSON 解析。
+     *
+     * 不合规的一律排除：`<profileId>.json`（历史本体，无时间戳）、`*.json.tmp`（[writeAtomic] 的
+     * 临时文件，不以 `.json` 结尾）、其它账号的备份与归档。
+     */
+    private fun backupFilesNewestFirst(): List<File> {
+        val parsed = (usersDir.listFiles() ?: emptyArray())
+            .filter { it.isFile }
+            .mapNotNull { f -> parseBackupTs(f.name)?.let { ts -> f to ts } }
+        return parsed.sortedWith(
+            compareByDescending<Pair<File, LocalDateTime>> { it.second }
+                .thenByDescending { dupIndexOf(it.first.name) },
+        ).map { it.first }
     }
 
     /**
@@ -419,4 +751,35 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
     }
 
     private fun toInt(v: Any?): Int? = toLong(v)?.toInt()
+
+    /**
+     * 读 `scan_gaps`（视图 → offset 数组）。
+     *
+     * 结构不符一律**回空 map**（与 [load] 同一条降级契约：手改坏的文件不该让页面崩）。
+     * 非数字项跳过；`view` 键保留原样（与 PC 的视图标识口径一致）。
+     */
+    private fun toGapMap(v: Any?): Map<String, List<Int>> {
+        val m = v as? Map<*, *> ?: return emptyMap()
+        val out = LinkedHashMap<String, List<Int>>()
+        for ((k, value) in m) {
+            val list = value as? List<*> ?: continue
+            val offsets = ArrayList<Int>(list.size)
+            for (item in list) toInt(item)?.let { offsets.add(it) }
+            out[k.toString()] = offsets
+        }
+        return out
+    }
+
+    /**
+     * 读 `last_capture_detail`。
+     *
+     * **任一必需字段缺失即返回 null**（而不是补默认值）—— 宁可显示「上次　暂无记录」，
+     * 也不要显示一个「09:40–09:40 · 0 条」的半截记录：后者会被读成「真的抓过一场但是空的」。
+     */
+    private fun toCaptureDetail(v: Any?): CaptureDetail? {
+        val m = v as? Map<*, *> ?: return null
+        val started = m[KEY_DETAIL_STARTED_AT] as? String ?: return null
+        val ended = m[KEY_DETAIL_ENDED_AT] as? String ?: return null
+        return CaptureDetail(started, ended, toInt(m[KEY_DETAIL_ADDED]) ?: 0)
+    }
 }

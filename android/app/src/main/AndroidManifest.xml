@@ -39,8 +39,27 @@
 
     <!-- Android 11+（API 30）包可见性限制：须显式声明目标游戏包，
          否则 getApplicationInfo/.uid 对第三方包一律抛 NameNotFoundException，
-         即使游戏已安装也会误判「未安装」，且 VpnService 解 uid 失败。 -->
+         即使游戏已安装也会误判「未安装」，且 VpnService 解 uid 失败。
+
+         2026-09-18 渠道服支持：官服是 com.bmystu.peng.gw，渠道服包名不同
+         （用户实测 OPPO = com.bmystu.peng1.nearme.gamecenter；用户确认
+         小米 = com.bmystu.peng.mi、B站 = com.bmystu.peng.bilibili），写死一个包
+         ⇒ 渠道服玩家一律被判「未安装」。故：
+         · <intent>（MAIN/LAUNCHER）—— 让 App 能枚举「有图标的应用」，
+           再由 vpn/TargetPackages.matches() 按前缀规则筛选。**不需要任何新权限**，
+           且未知渠道服无需改码/重打包即可被检出；
+         · <package> —— 四条已确认渠道显式兜底（防个别 ROM 不兑现 <intent> 可见性），
+           也是「官服已装但无启动器活动」时 resolve() 回落到它的前提。
+         ⚠️ <package> 是**兜底而非枚举手段**：每出一个新渠道都要在这里加一行 ⇒
+         未知渠道只能靠 <intent>。两条路都失效时，退路是 QUERY_ALL_PACKAGES（未采用）。 -->
     <queries>
         <package android:name="com.bmystu.peng.gw" />
+        <package android:name="com.bmystu.peng1.nearme.gamecenter" />
+        <package android:name="com.bmystu.peng.mi" />
+        <package android:name="com.bmystu.peng.bilibili" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 </manifest>
