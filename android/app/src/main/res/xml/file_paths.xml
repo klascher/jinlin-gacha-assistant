@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可分享路径清单（U1 导出分享，2026-09-21）。
+
+     ⚠️ 只列 exports/ 一处：导出文件落 `filesDir/exports/`（契约 §10-b 裁定），分享走
+     ACTION_SEND 的 content:// URI。**刻意不放开 users/** —— 账号历史是本 App 的私有底账，
+     没有任何分享入口用到它，多列一条就多一条误分享面。
+
+     抓包记录 / 诊断文件的分享入口（S4 / T10）落地时**再**按需追加 <files-path>；
+     届时若要分享私有目录外的位置，须一并评估 <cache-path> / <external-files-path>。 -->
+<paths>
+    <files-path
+        name="exports"
+        path="exports/" />
+</paths>

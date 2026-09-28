@@ -95,8 +95,13 @@ class ProfileStore(private val rootDir: File) {
         }
     }
 
-    private val usersDir: File get() = File(rootDir, USERS_DIR)
     private val registryFile: File get() = File(rootDir, REGISTRY_NAME)
+
+    /**
+     * 账号历史目录（`<root>/users`）—— 与 PC `ProfileManager.users_dir` 同名同义，是
+     * 「账号历史落在哪」的**单源**（`SyncBackend` 用它构造 `HistoryStore`，不再自己拼路径）。
+     */
+    val usersDir: File get() = File(rootDir, USERS_DIR)
 
     private var activeId: String = ""
     private val order = mutableListOf<String>()

@@ -8,9 +8,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 自定义 Application（2026-09-22）：进程启动时按设置恢复 App 级日志开关，见 GachaApp.kt -->
     <application
+        android:name=".GachaApp"
         android:label="@string/app_name"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.JinlinGacha"
         android:usesCleartextTraffic="false">
@@ -35,6 +37,24 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- FileProvider（U1 导出分享，2026-09-21）：
+             ACTION_SEND 不能携带 file:// URI —— API 24+ 直接抛 FileUriExposedException。
+             必须经 content:// 授权给接收方应用，故需要本 Provider。
+             · exported=false + 只有本 App 能 grantUriPermissions ⇒ 接收方拿到的是一次性、
+               限定到单个 URI 的读权限，读不到 exports/ 之外任何路径；
+             · authorities 用 ${applicationId} 占位 ⇒ 改包名（渠道服重打包）时不必改这里，
+               代码侧用 BuildConfig.APPLICATION_ID + ".fileprovider" 拼接，两边同源。
+             · 可分享路径清单在 res/xml/file_paths.xml（当前只放开 exports/）。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
     <!-- Android 11+（API 30）包可见性限制：须显式声明目标游戏包，

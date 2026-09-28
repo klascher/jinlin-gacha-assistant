@@ -7,7 +7,7 @@ import org.junit.Test
  * GachaRecognizer 逐字对拍闸门 —— 由 `scripts/m_gen_gacha_gold.py` 自动生成，勿手改。
  * 向量 = 真实 S->C 帧体(hex) + PC `looks_like_gacha` 判定期望，来源样本：
  *   - 真机阶段0 PCAPdroid 单流（203.0.113.7:18085）
- *   - 全部卡池数据请求 pcapng（9 卡池大流，approx 161 帧）
+ *   - sample-2.pcapng（9 卡池大流，approx 161 帧）
  * 本测试断言 Kotlin 判定与 PC 基准逐帧相等；任一不符即平移有偏差（调整 GachaRecognizer，
  * 别改这个文件）。
  */

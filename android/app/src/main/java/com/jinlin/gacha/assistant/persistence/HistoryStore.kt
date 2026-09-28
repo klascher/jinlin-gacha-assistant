@@ -131,6 +131,19 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
          */
         private const val KEY_LAST_CAPTURE_DETAIL = "last_capture_detail"
 
+        /**
+         * 本类**拥有**（自己生产、并负责写回）的顶层键。其余顶层键一律按「跨端键」原样透传，
+         * 见 [foreignKeysOf]。
+         */
+        private val OWNED_KEYS: Set<String> = setOf(
+            KEY_RECORDS,
+            KEY_VIEW_TOTALS,
+            KEY_TOTAL,
+            KEY_SCAN_GAPS,
+            KEY_SOURCE_PACKAGES,
+            KEY_LAST_CAPTURE_DETAIL,
+        )
+
         /** 明细里的三个子键（mobile 内部约定）。 */
         private const val KEY_DETAIL_STARTED_AT = "started_at"
         private const val KEY_DETAIL_ENDED_AT = "ended_at"
@@ -243,6 +256,22 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
     private var loadedCaptureDetail: CaptureDetail? = null
 
     /**
+     * 磁盘上**本类不拥有**的顶层键 —— 跨端键透传的落点（U1，2026-09-21）。
+     *
+     * 为什么需要它：本类原先写盘时只写自己那 6 个键（[OWNED_KEYS]），于是**任何一次
+     * Android 写盘都会把别端写的键抹掉**。真实例子：PC `history.py::save()` 会写
+     * `"session": {"current_pool_id", "capture_start"}` ⇒ 「手机 → PC → 手机」走一趟，
+     * 手机这一写就把 PC 的 `session` 删了。
+     *
+     * 规则对齐 PC `history.py::_carry_foreign_keys`：
+     * - **不认识的一律原样继承**（不解读、不校验），将来任一端新增键都自动跟随；
+     * - 例外只有 [clear]：清空 = 放弃记录 ⇒ 连同这些键一起丢弃
+     *   （对齐 PC `_write_payload(preserve_unknown=False)`），否则会出现
+     *   「记录清空了、会话上下文还留着」的自相矛盾。
+     */
+    private var loadedForeignKeys: Map<String, Any?> = emptyMap()
+
+    /**
      * 最近一场**已落库**抓包的明细（记录页「上次」行用）；从未停抓过为 null。
      *
      * ⚠️ 它**不随周期落盘更新** —— 只由停抓收尾那条 [merge] 写入。否则「上次」会显示成
@@ -291,6 +320,7 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         loadedScanGaps = emptyMap()
         loadedSourcePackages = linkedSetOf()
         loadedCaptureDetail = null
+        loadedForeignKeys = emptyMap()
         lastReport = null
         if (!historyFile.exists()) return
 
@@ -316,6 +346,7 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
             ?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }
             ?.toMutableSet() ?: linkedSetOf()
         loadedCaptureDetail = toCaptureDetail(map[KEY_LAST_CAPTURE_DETAIL])
+        loadedForeignKeys = foreignKeysOf(map)
         backfillTotalIfComplete()
     }
 
@@ -416,8 +447,78 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         loadedScanGaps = emptyMap()
         loadedSourcePackages = linkedSetOf()
         loadedCaptureDetail = null
+        loadedForeignKeys = emptyMap()
         lastReport = null
         return writePayload(keepRestorePoint = true)
+    }
+
+    /**
+     * 用导入计划的「三件套」**整份替换**本账号的历史（U1 互通导入专用，2026-09-21）。
+     *
+     * ### 为什么不复用 [merge]
+     * 导入的语义是**整份替换**，不是「按位置并入」：`sync_file.planImport` 已经解算出最终
+     * 要落盘的三件套（`MERGE` 选「文件里的」⇒ 取文件全部记录；选「应用里的」⇒ 写回设备现值，
+     * 实为 no-op）。而 [merge] 走 `PositionAlign.mergeByPosition`（位置判重 + 追加），
+     * 拿来做导入会得到完全不同的结果。
+     *
+     * ### 固定做三件事（对齐 PC `sync_apply.build_payload` + `history._carry_foreign_keys`）
+     * 1. 三个自有键（`records` / `view_totals` / `total`）**整体覆盖**为计划值；
+     * 2. `last_capture_detail` **显式作废**（`null`）—— 它描述「上一场抓包」，而记录已被整份
+     *    换掉，留着会让记录页显示一个对不上的「上次 N 条」；与 PC 的
+     *    `_CLEARED_FOREIGN_KEYS = ("last_capture_detail",)` 同义；
+     * 3. `scan_gaps` / `source_packages` / **跨端键**（[loadedForeignKeys]）保持 [load] 时
+     *    读到的原值原样写回。
+     *
+     * 备份、备份裁剪（[MAX_BACKUPS] / [BUDGET_BYTES]）、原子写**全部复用 [writePayload]** ——
+     * 这是「写盘三件事只有一份实现」的落点（2026-09-21 定案：不给导入另写一套）。
+     *
+     * > ⚠️ 与 PC 的一处**有意差异**：输出按 `timestamp` **稳定倒序**（沿用本类不变量
+     * > 「[records] 倒序」），PC 则按文件里的原顺序写。对判重 / 统计 / 保底消费序**无影响**
+     * > （`PositionAlign.mergeByPosition` 按 `timestamp` 分组，与数组顺序无关），
+     * > 而正常文件本身就是倒序 ⇒ 绝大多数情况下逐位相同。
+     * >
+     * > 另一处差异在**备份触发条件**：本类对「主文件损坏不可读」无条件留档（保命），
+     * > PC 的 `sync_apply._backup_copy` 在同样情形下不留 —— 沿用 Android 既有
+     * > [writePayload] 行为，M5 不改。
+     *
+     * @param rawRecords 计划里的 `write.records`（JSON 形态 5 键，与 [load] 读到的同形）
+     * @param total 计划里的 `write.total`（允许 `null`）。取 [Long] 而非 [Int] 是为了与
+     *   `SyncFile.WriteBundle`（wire 形态，整数一律 [Long]）**同型**，调用方不必手动转换；
+     *   类内部仍是 [Int]（分页计数，量级远小于 2^31），在此处一次收敛。
+     * @param viewTotals 计划里的 `write.view_totals`（同上，[Long] 版本）
+     * @param keepRestorePoint 是否在写盘前留还原点。导入路径**恒传 `true`**（镜像 PC
+     *   `sync_apply` 的「逐个备份原文件」）—— 契约 §6.2-e 的「一个还原点」指**一轮**备份，
+     *   而非「全批只此一份」：备份文件按账号分文件，一份不可能覆盖全部账号。
+     * @param onBackupCreated **备份刚生成、写盘尚未开始**时回调（给 [SyncBackend] 的
+     *   回滚日志用）。实现**必须不抛**（抛会中断落盘）；默认 `null` = 不关心。
+     * @return 本次生成的备份文件；磁盘上无有效历史可备份时为 null
+     * @throws IllegalStateException 某条记录缺身份键（`parse()` 已拦，出现即上游 bug）
+     */
+    fun replaceRecords(
+        rawRecords: List<Map<String, Any?>>,
+        total: Long?,
+        viewTotals: Map<String, Long>,
+        keepRestorePoint: Boolean = true,
+        onBackupCreated: ((File) -> Unit)? = null,
+    ): File? {
+        val converted = ArrayList<GachaRecord>(rawRecords.size)
+        for (m in rawRecords) {
+            converted.add(
+                toRecord(m)
+                    ?: throw IllegalStateException(
+                        "导入记录缺身份键（pool_id/item_id/timestamp）：$m",
+                    )
+            )
+        }
+        // 稳定倒序：满足本类不变量，且同一事件内（同 ts）的相对顺序不变。
+        loaded = converted.sortedByDescending { it.timestamp }.toMutableList()
+        loadedTotals.clear()
+        for ((k, v) in viewTotals) loadedTotals[k] = v.toInt()
+        loadedTotal = total?.toInt()
+        // 会话明细作废（上方第 2 条）；scan_gaps / source_packages / 跨端键保持原值。
+        loadedCaptureDetail = null
+        lastReport = null
+        return writePayload(keepRestorePoint, onBackupCreated)
     }
 
     /**
@@ -481,8 +582,15 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
      * 把当前内存状态落库；返回本次生成的备份（无备份时为 null）。
      *
      * @param keepRestorePoint 见 [merge]。**损坏兜底不受它影响** —— 主文件不可读时无条件留档。
+     * @param onBackupCreated **备份刚生成、[writeAtomic] 尚未开始**时回调。存在的唯一理由：
+     *   导入路径（[replaceRecords]）需要在写盘**动到主文件之前**把这份备份记进回滚日志 ——
+     *   否则「写盘中途失败 ⇒ 主文件被截断」时，这份备份是无主文件，回滚既清不掉也定位不到，
+     *   而主文件已损坏 ⇒ 真丢数据。默认 `null` = 不关心（[merge] / [clear] / [restore] 走默认）。
      */
-    private fun writePayload(keepRestorePoint: Boolean = true): File? {
+    private fun writePayload(
+        keepRestorePoint: Boolean = true,
+        onBackupCreated: ((File) -> Unit)? = null,
+    ): File? {
         if (!usersDir.exists()) usersDir.mkdirs()
         val payload = buildPayload()
 
@@ -501,7 +609,11 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
             // payload，下一轮 existing != null 且 hasRecords = false ⇒ 不再造备份。
             // （残余：写盘持续失败时主文件将一直是损坏态 ⇒ 可能反复走该支；此时备份写入本身
             // 同样大概率失败，属极端场景，不额外加代码。）
-            if (existing == null || (keepRestorePoint && hasRecords)) backup = backupFile()
+            if (existing == null || (keepRestorePoint && hasRecords)) {
+                val created = backupFile()
+                backup = created
+                onBackupCreated?.invoke(created)
+            }
         }
         writeAtomic(payload)
         return backup
@@ -519,6 +631,10 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
      *
      * rename 失败（目标已存在且平台不支持覆盖式 rename 等）时降级为直接写，并清掉临时文件 ——
      * 降级路径等价于旧行为，不引入新的失败面。
+     *
+     * ⚠️ 清临时文件放在 `finally`：**降级写本身也可能失败**（磁盘满 / 权限），旧写法会让
+     * `tmp.delete()` 被跳过、在 `users/` 里留下 `<id>.json.tmp` 垃圾。该路径由导入回滚的
+     * 故障注入暴露（2026-09-21 M5）。
      */
     private fun writeAtomic(payload: Map<String, Any?>) {
         val text = MiniJson.encodePretty(payload, indent = 2)
@@ -529,8 +645,11 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
         } catch (e: Exception) {
             // 落到下面的降级分支
         }
-        historyFile.writeText(text, Charsets.UTF_8)
-        tmp.delete()
+        try {
+            historyFile.writeText(text, Charsets.UTF_8)
+        } finally {
+            tmp.delete()
+        }
     }
 
     /** 构造落库 payload；数值一律用 [Long]，好让「解码已有文件 == 新 payload」的结构判等成立。 */
@@ -564,7 +683,7 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
                 KEY_DETAIL_ADDED to it.added.toLong(),
             )
         }
-        return linkedMapOf(
+        val payload = linkedMapOf<String, Any?>(
             KEY_RECORDS to recs,
             KEY_VIEW_TOTALS to totals,
             KEY_TOTAL to loadedTotal?.toLong(),
@@ -573,6 +692,31 @@ class HistoryStore(private val usersDir: File, private val profileId: String) {
             KEY_SOURCE_PACKAGES to loadedSourcePackages.sorted(),
             KEY_LAST_CAPTURE_DETAIL to detail,
         )
+        // 跨端键透传：磁盘上本类**不拥有**的键原样并回（PC `_carry_foreign_keys` 同义，单源规则）。
+        // 放在末尾 ⇒ 键序确定（自有键在前、外来键在后），`existing == payload` 判等闸稳定。
+        for ((key, value) in loadedForeignKeys) {
+            if (key !in payload) payload[key] = value
+        }
+        return payload
+    }
+
+    /**
+     * 从磁盘解出的顶层 map 里**摘出本类不拥有**的键 —— 跨端键透传的来源（见 [loadedForeignKeys]）。
+     *
+     * 键统一转成 `String`：`map` 来自 [MiniJson] 解码（对象键本就是 String，这里再兜一层以防
+     * 解码实现变化）；值**原样保留**（不解读、不校验），这样「解码已有文件 == 新 payload」的
+     * 判等闸对跨端键同样成立（值对象逐结构相等）。
+     *
+     * 只摘不拥有键：`records` / `view_totals` / `total` / `scan_gaps` / `source_packages` /
+     * `last_capture_detail`（[OWNED_KEYS]）由本类自己生产、自己写回，不在这里重复带出。
+     */
+    private fun foreignKeysOf(map: Map<*, *>): Map<String, Any?> {
+        val out = LinkedHashMap<String, Any?>()
+        for ((k, v) in map) {
+            val key = k.toString()
+            if (key !in OWNED_KEYS) out[key] = v
+        }
+        return out
     }
 
     /** 备份当前历史为 `<profileId>_<时间戳>.json`（同秒冲突加 `_N`），对齐 PC 命名规约。 */

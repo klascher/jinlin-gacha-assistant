@@ -76,17 +76,23 @@ object MetadataClient {
         url: String = DEFAULT_ROLE_URL,
         http: HttpGetter = { u, h -> defaultHttp(u, h) },
     ): Result<Meta> {
-        val ts = System.currentTimeMillis() / 1000
-        val sig = HmacSign.sign(KEY, SECRET, ts)
-        val headers = mapOf(
-            HDR_KEY to KEY,
-            HDR_TS to ts.toString(),
-            HDR_SIG to sig,
-        )
-        return when (val out = http(url, headers)) {
+        return when (val out = http(url, authHeaders())) {
             is HttpOutcome.Err -> Result.failure(MetadataException(MetaErrorReason.NETWORK))
             is HttpOutcome.Ok -> classify(out.status, out.body, cacheFile)
         }
+    }
+
+    /**
+     * 构造 HMAC 三请求头（`X-Auth-Key/Timestamp/Signature`，签名串 `key+ts` 无分隔符）。
+     * §15 的公告/版本客户端共用同一套鉴权口径（同一 [KEY]/[SECRET]/[HmacSign]）。
+     */
+    internal fun authHeaders(): Map<String, String> {
+        val ts = System.currentTimeMillis() / 1000
+        return mapOf(
+            HDR_KEY to KEY,
+            HDR_TS to ts.toString(),
+            HDR_SIG to HmacSign.sign(KEY, SECRET, ts),
+        )
     }
 
     /** 只读当前缓存（09 §4.3 契约的 `cached()`；实现即 [MetaLoader.read]，此处一行委托对齐 API）。 */
@@ -105,8 +111,11 @@ object MetadataClient {
         return Result.success(meta)
     }
 
-    /** 默认 HTTP：内置 [HttpURLConnection]，零三方库；不进 [Err] 只抛走最后兜底的网络异常。 */
-    private fun defaultHttp(url: String, headers: Map<String, String>): HttpOutcome {
+    /**
+     * 默认 HTTP：内置 [HttpURLConnection]，零三方库；不进 [Err] 只抛走最后兜底的网络异常。
+     * `internal`：§15 的公告/版本客户端复用同一实现（App 内只此一份 HTTP 栈，不另抄一份）。
+     */
+    internal fun defaultHttp(url: String, headers: Map<String, String>): HttpOutcome {
         return try {
             val c = URL(url).openConnection() as HttpURLConnection
             try {

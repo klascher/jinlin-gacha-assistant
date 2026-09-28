@@ -18,7 +18,8 @@ import java.io.File
  * - **值未变化时不写盘**（幂等闸）；
  * - payload 用 PC 同款 snake_case 键名，且**不含 `active_profile`**（账号真相源在 [ProfileStore]）；
  * - `last_capture` / `metadata_*` 读写往返；`reload()` 感知外部改动；
- * - `target_packages`（2026-09-18 新增，渠道服接管范围）读写往返 + 去重 + **坏值降级**。
+ * - `target_packages`（2026-09-18 新增，渠道服接管范围）读写往返 + 去重 + **坏值降级**；
+ * - `app_log_enabled`（2026-09-22 新增，App 级日志开关）默认关 + 读写往返 + **坏值降级**。
  */
 class SettingsStoreTest {
 
@@ -192,5 +193,47 @@ class SettingsStoreTest {
             Charsets.UTF_8,
         )
         assertEquals("new.one", store().current.targetPackage)
+    }
+
+    // —— app_log_enabled（App 级日志开关，2026-09-22 新增）——
+
+    @Test
+    fun `app log switch defaults off and round-trips`() {
+        val s = store()
+        assertFalse("默认关闭：不打开就不写日志文件，行为与从前一致", s.current.appLogEnabled)
+
+        s.setAppLogEnabled(true)
+        assertTrue(s.current.appLogEnabled)
+        assertTrue(settingsFile().readText(Charsets.UTF_8).contains("\"app_log_enabled\""))
+        // 落盘往返（模拟 App 重启）
+        assertTrue(store().current.appLogEnabled)
+
+        // 坏值降级：非布尔 ⇒ 回默认 false，且**不删原文件**（与既有降级契约一致）
+        settingsFile().writeText("""{"app_log_enabled": "yes"}""", Charsets.UTF_8)
+        assertFalse(store().current.appLogEnabled)
+        assertTrue("坏值不应导致文件被删", settingsFile().exists())
+    }
+
+
+    // —— acknowledged_version（prompt 更新弹窗已确认版本，§15 §4.2）——
+
+    @Test
+    fun `acknowledged version defaults empty and round-trips`() {
+        val s = store()
+        assertEquals("默认空 = 从未确认过 ⇒ prompt 弹窗该弹就弹", "", s.current.acknowledgedVersion)
+
+        s.setAcknowledgedVersion("0.2.0")
+        assertEquals("0.2.0", s.current.acknowledgedVersion)
+        assertTrue(settingsFile().readText(Charsets.UTF_8).contains("\"acknowledged_version\""))
+        // 落盘往返（模拟 App 重启）
+        assertEquals("0.2.0", store().current.acknowledgedVersion)
+    }
+
+    @Test
+    fun `acknowledged version tolerates bad values`() {
+        settingsFile().writeText("""{"acknowledged_version": 123}""", Charsets.UTF_8)
+        // 非字符串 ⇒ 回空串（重新弹一次可接受的降级），不删原文件
+        assertEquals("", store().current.acknowledgedVersion)
+        assertTrue(settingsFile().exists())
     }
 }

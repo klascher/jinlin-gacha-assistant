@@ -59,7 +59,7 @@ import kotlinx.coroutines.withContext
  * **开发期要清录包产物** ⇒ 把下面集合里 `CleanKind.CAPTURE_PCAP` 那一行**注释掉**即可
  * 恢复展示（无需改任何其它代码）。
  *
- * ⚠️ **这是展示层开关，不是功能删减**：数据层 `StorageCleaner` 仍扫四类、三闸守卫不变，
+ * ⚠️ **这是展示层开关，不是功能删减**：数据层 `StorageCleaner` 仍扫**五类**（2026-09-22 新增 App 日志）、三闸守卫不变，
  * `StorageCleanerTest` 的 5 例（含四类扫描）也不变；`CleanKind.CAPTURE_PCAP` 的枚举分支
  * （[kindLabelRes] / [itemTitle]）**照留** —— 删了 `when` 不穷尽、恢复时还要重写。
  */
@@ -430,6 +430,7 @@ private fun kindLabelRes(kind: CleanKind): Int = when (kind) {
     CleanKind.CAPTURE_PCAP -> R.string.clean_kind_records
     CleanKind.DIAG_PCAP -> R.string.clean_kind_diagnose
     CleanKind.META_CACHE -> R.string.clean_kind_cache
+    CleanKind.APP_LOG -> R.string.clean_kind_applog
 }
 
 /**
@@ -440,7 +441,7 @@ private fun itemTitle(item: CleanItem): String = when (item.kind) {
     CleanKind.BACKUP -> joinNonBlank(item.accountName, item.timestamp?.format(ITEM_FMT))
     CleanKind.CAPTURE_PCAP -> item.timestamp?.format(ITEM_FMT) ?: item.file.name
     CleanKind.DIAG_PCAP -> joinNonBlank(item.reason, item.timestamp?.format(ITEM_FMT))
-    CleanKind.META_CACHE -> item.file.name
+    CleanKind.META_CACHE, CleanKind.APP_LOG -> item.file.name
 }
 
 /** 每项副行：备份多带条数（其余只有体积）。 */

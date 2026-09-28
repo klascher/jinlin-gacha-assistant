@@ -1,6 +1,7 @@
 package com.jinlin.gacha.assistant.persistence
 
 import java.io.File
+import java.time.LocalDate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -12,7 +13,7 @@ import org.junit.rules.TemporaryFolder
  * [StorageCleaner] 单测 —— 临时目录 + 纯 JVM（不需要 Context / Android 运行时）。
  *
  * 覆盖「数据清理」子页数据层的四条底线：
- * - **四类识别**：备份 / 录包 pcap / 诊断包 / 元数据缓存都能扫到，且备份带账号名与记录条数
+ * - **五类识别**：备份 / 录包 pcap / 诊断包 / 元数据缓存 / App 日志都能扫到，且备份带账号名与记录条数
  *   （UI 跨账号展示要用）；
  * - **孤儿存档不入列表**：已删账号的归档与备份**完全同形**（`ProfileStore.uniqueArchive` 与备份
  *   命名一致），但它是该账号数据的唯一副本 ⇒ 删掉即永久丢失，故按注册表 id 前缀天然排除；
@@ -152,5 +153,44 @@ class StorageCleanerTest {
         assertEquals(0, result.deleted)
         assertEquals(1, result.failed)
         assertTrue("穿越路径不得删到 users/ 之外", secret.exists())
+    }
+
+    // —— ⑥ App 日志（2026-09-22 新增：第五类）——
+
+    @Test
+    fun `scan finds app logs and ignores names off the convention`() {
+        write(File(File(externalDir, "applog"), "app-20260920.txt"), "1")
+        write(File(File(externalDir, "applog"), "app-20260922.txt"), "12")
+        // 名字不合规 ⇒ 不入列表（`app-notes.txt` 缺 8 位日期；`app-20260922.log` 后缀不符）
+        write(File(File(externalDir, "applog"), "app-notes.txt"), "x")
+        write(File(File(externalDir, "applog"), "app-20260922.log"), "x")
+
+        val cat = cleaner().scan(names).first { it.kind == CleanKind.APP_LOG }
+
+        assertEquals(2, cat.count)
+        assertEquals(3L, cat.bytes)
+        // 新在前（与备份/诊断包同一排序口径），时刻由文件名解出
+        assertEquals("app-20260922.txt", cat.items[0].file.name)
+        assertEquals("app-20260920.txt", cat.items[1].file.name)
+        assertEquals(LocalDate.of(2026, 9, 20), cat.items[1].timestamp?.toLocalDate())
+    }
+
+    @Test
+    fun `delete app log outside the applog dir is refused`() {
+        val inside = write(File(File(externalDir, "applog"), "app-20260901.txt"), "abcd")
+        // 同一条名规约、却落在别的目录 ⇒ 必须被「允许目录直接子项」这一闸拦下
+        val outside = write(File(File(externalDir, "records"), "app-20260901.txt"), "abcd")
+
+        val result = cleaner().delete(
+            listOf(
+                CleanItem(inside, inside.length(), CleanKind.APP_LOG),
+                CleanItem(outside, outside.length(), CleanKind.APP_LOG),
+            ),
+        )
+
+        assertEquals(1, result.deleted)
+        assertEquals(1, result.failed)
+        assertFalse(inside.exists())
+        assertTrue("同名规约落在别的目录必须拒绝", outside.exists())
     }
 }

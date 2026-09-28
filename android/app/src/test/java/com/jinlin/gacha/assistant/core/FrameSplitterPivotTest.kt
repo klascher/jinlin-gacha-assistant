@@ -10,7 +10,7 @@ import org.junit.Test
  * PC `gacha_exporter/capture/engine.py::extract_frames` 实际执行。
  * 来源样本：
  *   - 真机阶段0 PCAPdroid（203.0.113.7:18085 抽卡流）
- *   - 全部卡池数据请求 pcapng（203.0.113.8:12125 大流）
+ *   - sample-2.pcapng（203.0.113.8:12125 大流）
  * 本测试断言 Kotlin 切出的帧边界序列 + 余留与 PC 基准逐字相等；任一不符即平移偏差
  * （调 FrameSplitter，别改这个文件）。
  */

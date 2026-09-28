@@ -12,7 +12,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.jinlin.gacha.assistant.R
@@ -24,6 +23,7 @@ import com.jinlin.gacha.assistant.core.FrameSplitter
 import com.jinlin.gacha.assistant.core.GachaRecord
 import com.jinlin.gacha.assistant.core.ReassemblyWorker
 import com.jinlin.gacha.assistant.core.RecordFrameConsumer
+import com.jinlin.gacha.assistant.core.health
 import com.jinlin.gacha.assistant.locator.Endpoint
 import com.jinlin.gacha.assistant.locator.ObservedEndpointCollector
 import com.jinlin.gacha.assistant.persistence.HistoryStore
@@ -313,12 +313,12 @@ class GachaVpnService : VpnService() {
         val fd = try {
             builder.establish()
         } catch (e: Exception) {
-            Log.e(TAG, "VPN 通道建立失败", e)
+            CaptureLog.e(TAG, "VPN 通道建立失败", e)
             stopSelf()
             return
         }
         if (fd == null) {
-            Log.e(TAG, "VPN 通道建立失败: establish() 返回空")
+            CaptureLog.e(TAG, "VPN 通道建立失败: establish() 返回空")
             stopSelf()
             return
         }
@@ -373,7 +373,10 @@ class GachaVpnService : VpnService() {
                 "候选中=${locator.candidates().size}",
         )
         refreshEndpoints() // 设置页「已知端点」快照（同实例复用时同步既有确认）
-        dumper.start() // 诊断判别器重启（重置计时/计数；自动判据默认仅提示）
+        // U2：异常自动落盘开关 —— **开抓时读一次**（`09` §5 G2「下次生效」）。
+        // 运行中不再重读，故本次会话沿用开抓那一刻的设置；抓包中改开关只影响下一场。
+        dumper.autoTriggerEnabled = SettingsStore.get(applicationContext).autoDiagnose
+        dumper.start() // 诊断判别器重启（重置计时/计数；自动判据按 autoTriggerEnabled 决定是否落盘）
 
         // 07 设计 3.1：注册录包状态回调 → 落 companion + Toast + 刷通知按钮文案
         dumper.onRecordStateChanged = { recording, file, reason ->
@@ -407,6 +410,54 @@ class GachaVpnService : VpnService() {
                 }
             }
             mainHandler.post { startForeground(NOTIFICATION_ID, buildNotification()) }
+        }
+
+        // —— U11：注册诊断报告（.txt）的上下文来源（10 号稿 16.4 节）——
+        // **触发时求值** ⇒ 报告里是点「抓诊断」那一刻的会话态，不是开抓那一刻的。
+        // 数据源一律取**已发布的 StateFlow**（_state / _dedupState / _endpoints），
+        // 不跨线程直读去重流水线 —— 与「会话态归属写进数据、消费侧一处判定」同一约定。
+        dumper.reportSource = DiagnoseDumper.ReportSource {
+            val st = _state.value
+            val dd = _dedupState.value
+            val h = dd.health
+            // 两块先各算成字符串：避免把 if / 链式调用直接摆进 `+` 的操作数位（可读性 + 少一处解析歧义）
+            val startedText = if (st.sessionStartedAt > 0L) {
+                Instant.ofEpochMilli(st.sessionStartedAt).atZone(ZoneId.systemDefault())
+                    .toLocalDateTime().format(HistoryStore.CAPTURE_DETAIL_FMT)
+            } else {
+                "未知（本次未在抓包，或进程重启后状态已复位）"
+            }
+            val endpointsText = _endpoints.value.joinToString("、") { it.ip + ":" + it.port }
+                .ifEmpty { "（尚无）" }
+            listOf(
+                "会话" to listOf(
+                    "账号: " + sessionProfileId.ifEmpty { "未知" },
+                    "接管包名: " + target,
+                    "会话开始: " + startedText,
+                    "已确认抽卡端点: " + endpointsText,
+                    "全量录包中: " + dumper.isFullRecording(),
+                ).joinToString("\n"),
+                "完整性" to listOf(
+                    "健康判定: " + h.state + " / " + h.reason,
+                    "全部卡池: " + (if (dd.allPoolsSeen) "已见" else "未见") +
+                        "；丢弃非「全部卡池」页 " + dd.droppedPages + " 页",
+                    "覆盖: 已拿 " + dd.gapSeenPages + "/" + dd.gapExpectedPages + " 页；服务器权威总抽数 " +
+                        dd.authoritativeTotal + " 条；仍缺 " + dd.missingPageCount + " 页",
+                    "缺口（A 首屏，继续翻拿不到）: " + dd.headGapPages,
+                    "缺口（B 中段空洞，翻回去可补）: " + dd.midGapPages,
+                    "缺口（C 尾部未翻）: " + dd.tailGapPages,
+                    "（以上为 offset，落盘口径；UI 层才换算成「第 N 页」并补注「第 1 页 = 最新那一页」）",
+                    "本场: 收下 " + dd.newCount + " 条 / 解析 " + dd.parsedCount + " 条（含判重跳过的旧记录）",
+                    "被限流拒页: " + dd.rejectedPages + "；已见 offset 区间: " +
+                        dd.minSeenOffset + " ~ " + dd.maxSeenOffset,
+                    "与历史重叠: " + dd.overlapped + "（会话开始前有历史: " + dd.hadHistory + "）",
+                ).joinToString("\n"),
+                "合并" to listOf(
+                    "本次未接入 —— MergeReport 只在收尾的 finalizeSession() 里产出，",
+                    "点「抓诊断」的时刻还取不到；HistoryStore.lastReport 不落盘、恒为 null（10 号稿已登记）。",
+                    "收尾时的合并结果，请见本报告日志段的「去重收尾：…」一行。",
+                ).joinToString("\n"),
+            )
         }
 
         firstPacketLogged = false
@@ -457,7 +508,7 @@ class GachaVpnService : VpnService() {
                 if (got < 0) break
                 got
             } catch (e: IOException) {
-                Log.i(TAG, "读 tun 退出")
+                CaptureLog.i(TAG, "读 tun 退出")
                 break
             }
             if (n <= 0) continue
@@ -484,7 +535,7 @@ class GachaVpnService : VpnService() {
         try {
             connectionManager?.shutdown()
         } catch (e: Exception) {
-            Log.w(TAG, "转发层关闭异常", e)
+            CaptureLog.w(TAG, "转发层关闭异常", e)
         }
         reassembly.shutdown()
         // 收尾落库：worker 已停（且 consumer 方法与之互斥）→ 把本场去重后的新增并入历史
@@ -639,7 +690,7 @@ class GachaVpnService : VpnService() {
     }
 
     private fun stopVpn() {
-        Log.i(TAG, "请求停止抓包")
+        CaptureLog.i(TAG, "请求停止抓包")
         running = false
         readerThread?.interrupt()
         cleanup()
@@ -654,7 +705,7 @@ class GachaVpnService : VpnService() {
      * 通知栏却还挂着「监听中」，用户以为在抓包、实际什么都没抓到，且无法从通知栏停掉。
      */
     override fun onRevoke() {
-        Log.w(TAG, "VPN 授权被撤销，服务自停")
+        CaptureLog.w(TAG, "VPN 授权被撤销，服务自停")
         running = false
         readerThread?.interrupt()
         cleanup()

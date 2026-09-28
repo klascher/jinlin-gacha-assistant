@@ -170,7 +170,8 @@ fun RecordsScreen() {
             color = colors.onSurface,
         )
 
-        // 三行 header（U5 §17.12.4）：总计 / 上次 / 本次。三行并列本身已消歧，故一律不写「本场」。
+        // 三行 header（U5 §17.12.4）：总计 / 上次 / 本次。三行并列本身已消歧，故**这三行**不写「本场」
+        // （2026-09-20 裁定：该约束只覆盖本组三行，别处不适用 —— 见 [RecordHeader] KDoc）。
         RecordHeader(
             total = allRecords.size,
             lastCapture = lastCapture,
@@ -291,7 +292,15 @@ private val TIME_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-d
 /**
  * 记录页顶部三行 header（U5 `10-去重模块设计.md` §17.12.4）：**总计 / 上次 / 本次**。
  *
- * 三行并列本身就消歧，故一律**不写「本场」**（那个叫法只在设计稿内部用；面向用户一律「本次」）。
+ * 三行并列本身就消歧，故**本组三行一律不写「本场」**（那个叫法只在设计稿内部用；面向用户一律「本次」）。
+ *
+ * ⚠️ **该约束只覆盖这三行 header**（2026-09-20 用户裁定）—— 别处**不适用**：`10-去重模块设计.md`
+ * §17.12.2 把「**本场**」定义成了**正式的用户用词**，子页的「本场扫描范围 / 本场时间」属**局部语境**
+ * （单条说明，不靠三行并列消歧），改成「本次」反而指代不清。
+ * ⇒ 面向用户共 **9 处**「本场」**保持不动**（`strings.xml` 8 处：`account_clear_warning` /
+ * `live_reason_unclear` / `stop_head_step1` / `health_pages_covered` / `health_covered_note` /
+ * `health_card_uncollected` / `health_sec_scan` / `health_sec_time`；另 [captureTimeLine] 里
+ * 硬编码的「本场 HH:mm 开始」1 处）。清单与裁定留痕见 `10` §17.9.2 发现 #2。
  *
  * - **总计** = 本页并集条数（历史 + 本次未落库新增）；有服务器权威 total 时二者应相等。
  * - **上次** = 上一场**已落库**抓包的起止 + 该场**新增**条数（**非累计** —— 否则与「总计」语义重叠）；

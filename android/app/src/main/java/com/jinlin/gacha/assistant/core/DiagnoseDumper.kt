@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * 诚实边界 / 取向：真机正常操作里「隧道开了但还没开游戏」「只翻别人页面不翻抽卡」本就会
  * 产生「无包 / S->C 零载荷 / 判定恒 0」现象，自动判据天然易误报。因此 **自动判据默认只
- * 打印提示、不主动落盘**（[AUTO_TRIGGER_ENABLED]=false）；真正落盘以用户手动为主。
+ * 打印提示、不主动落盘**（[autoTriggerEnabled]=false，默认）；真正落盘以用户手动为主。
  *
  * 线程：observe() 由 tun 读线程调；录制写盘在独立线程，不阻塞转发主路径。
  */
@@ -51,9 +51,9 @@ class DiagnoseDumper(private val appContext: Context) {
         private const val TAG = "GachaDiag"
         private const val RING_SIZE = 4096           // 环形缓冲保最近 N 原包（约 MB 级常驻）
         private const val RECORD_WINDOW_MS = 12_000L // 触发后继续捞 12s 的包
-        /** 自动落盘总开关：默认关（见类注释），开启后判据命中才真正写盘。 */
-        private const val AUTO_TRIGGER_ENABLED = false
         private const val AUTO_SILENCE_MS = 20_000L  // 启动缓冲期：超此才算「持续异常」，避免起步误判
+        /** B1 判据下限：S->C 已切出帧达到此数、却仍无命中，才算可疑。 */
+        private const val B1_MIN_SERVER_FRAMES = 3L
         private const val SYNC_PKT_BEFORE_WARN = 60L // A2：累计包数越此仍无 S->C 载荷才判可疑
         private const val CHECK_INTERVAL_MS = 1_000L
         private const val FULL_QUEUE = 65536        // 全量录包写缓冲；满则计丢包（不阻塞 tun 读）
@@ -65,10 +65,118 @@ class DiagnoseDumper(private val appContext: Context) {
         private const val FULL_MAX_BYTES = 512L * 1024 * 1024
         /** 剩余可用空间低于此值（MB）自动停录，避免写爆分区。 */
         private const val FULL_MIN_FREE_MB = 200L
+
+        /**
+         * 触发原因 → 人能读的标签。**未知原因原样返回**（不吞信息）——
+         * 以后新增触发路径时报告里会直接露出新字符串，而不是被折成「其他」。
+         */
+        internal fun reasonLabel(reason: String): String = when (reason) {
+            "manual" -> "用户手动触发（通知栏「抓诊断」）"
+            "auto" -> "自动判据命中"
+            else -> reason
+        }
+
+        /**
+         * 纯函数：给定计数与阈值，返回命中的判据文案；未命中返回 `null`。
+         *
+         * 抽出来只为「能 JVM 单测」—— 判据决定**是否自动落盘**，是这套诊断机制的核心，
+         * 却因本类依赖 `Context` 与后台线程而无法整类单测（同 [renderReport] 的理由）。
+         *
+         * 三条判据**互斥、按优先级**（A1 > A2 > B1）只报第一个命中的 —— 与改造前的
+         * `if / else if / else if` 逐条等价。阈值/缓冲期由调用方传入，单测可独立给定。
+         *
+         * @param elapsedMs 隧道建立至今毫秒；小于 [silenceMs] 属起步缓冲期，一律不判
+         * @return 命中文案（含 `A1`/`A2`/`B1` 前缀），或 `null`
+         */
+        internal fun automaticHit(
+            elapsedMs: Long,
+            silenceMs: Long,
+            packets: Long,
+            s2cPayloadPackets: Long,
+            syncPacketThreshold: Long,
+            serverFrames: Long,
+            gachaHits: Long,
+        ): String? {
+            if (elapsedMs < silenceMs) return null
+            return when {
+                // A1：启动后至今一个包都没见到（隧道空转 / 白名单没拦到）
+                packets == 0L -> "A1 隧道建立后 ${elapsedMs / 1000}s 仍无任何 IP 包"
+                // A2：有不少包却没有一条服务器回包（方向/端口/连接建立异常）
+                packets >= syncPacketThreshold && s2cPayloadPackets == 0L ->
+                    "A2 累计 $packets 包仍无 S->C 载荷回包"
+                // B1：S->C 切出帧不少却判定恒 0（方向反 / 信封错位 / 协议判错）
+                serverFrames >= B1_MIN_SERVER_FRAMES && gachaHits == 0L ->
+                    "B1 S->C 已切 $serverFrames 帧但 looks_like_gacha 恒 0"
+                else -> null
+            }
+        }
+
+        /**
+         * 渲染 `.txt` 诊断报告全文。
+         *
+         * **纯函数**（无 IO、无 Android 依赖、行尾固定 `\n`）⇒ 可在 JVM 单测里逐段断言；
+         * 写盘那半在 [writeReport]。刻意不用 `appendLine` —— 它取平台行分隔符，
+         * 在 Windows 上跑单测会变成 CRLF ⇒ 断言随机器而变（本项目已栽过同类跟头）。
+         *
+         * 段序固定：`[触发]` → 钩子给的会话段落（会话 / 完整性 / 合并）→ `[日志]`。
+         * 两处「说空话」是**写死**的：钩子未接入写「本次未接入」、日志为空写「（无）」
+         * —— 「没这一段」与「这一段是空的」在排障时是两个意思，不能都表现为空白。
+         */
+        internal fun renderReport(
+            reason: String,
+            pcapName: String?,
+            generatedAt: String,
+            packets: Long,
+            stats: Stats,
+            sections: List<Pair<String, String>>,
+            logLines: List<String>,
+            logCapacity: Int,
+        ): String {
+            val out = ArrayList<String>()
+            out += "# 金鳞抽卡导出小助手 · 诊断报告"
+            out += "# 与同目录的同名 .pcap 成对保存（U11；见 mobile/docs/10-去重模块设计.md 16.4 节）"
+            out += "# 本文件含包名与端点 IP：仅在你主动提供时离开手机，本项目零联网上报。"
+            out += ""
+            out += "[触发]"
+            out += "触发原因: " + reasonLabel(reason)
+            out += "生成时刻: " + generatedAt
+            out += "pcap 文件: " + (pcapName ?: "未生成（pcap 落盘失败；本报告仍然有效）")
+            out += "已观察 IP 包: " + packets
+            out += "切分层统计: " + stats
+            out += ""
+            if (sections.isEmpty()) {
+                out += "[会话 / 完整性 / 合并]"
+                out += "本次未接入 —— 数据源在会话层，报告钩子没有注册。"
+                out += "若需要这三段：请把本报告与 .pcap 一并提供，并说明点「抓诊断」之前做了什么操作。"
+                out += ""
+            } else {
+                for ((title, body) in sections) {
+                    out += "[" + title + "]"
+                    out += body.trimEnd('\n').split('\n')
+                    out += ""
+                }
+            }
+            out += "[日志] App 日志全文（CaptureLog，最多 " + logCapacity + " 行；与 logcat 同源）"
+            if (logLines.isEmpty()) {
+                out += "（无）"
+            } else {
+                out += logLines
+            }
+            return out.joinToString("\n", postfix = "\n")
+        }
     }
 
     @Volatile private var collecting = false
     private val startedAt = AtomicLong(0)
+
+    /**
+     * 异常自动落盘总开关（U2，2026-09-20）。**默认 `false`** —— 保持既有行为：判据命中只提示、不落盘。
+     *
+     * 由 `GachaVpnService` 在**每次开始抓包时**从 `SettingsStore.autoDiagnose` 注入一次
+     * （`09` §5 G2「下次生效」）。本类**不读取开关来源、也不在运行中重读** ⇒ 一次会话内取到的
+     * 恒是「开抓那一刻」的用户设置；`@Volatile` 保证 checker 线程能看到服务线程那次写入。
+     */
+    @Volatile var autoTriggerEnabled = false
 
     // —— M1 抓取计数（模拟非阻塞，tun 线程写）——
     private val pktCount = AtomicLong(0)
@@ -100,6 +208,25 @@ class DiagnoseDumper(private val appContext: Context) {
      * 由 GachaVpnService 注册，落到 companion 供 Activity 读取——**回调而非 Activity 轮询 dumper**。
      */
     var onRecordStateChanged: ((recording: Boolean, file: File?, reason: String?) -> Unit)? = null
+
+    /**
+     * 诊断报告（同名 `.txt`，U11）的上下文来源 —— 见 `mobile/docs/10-去重模块设计.md` 16.4 节。
+     *
+     * 为什么做成「可注册的钩子」而不是让本类自己去读会话态：报告要的**账号 / 接管范围 /
+     * 去重快照 / 合并结果**都属**会话层**（`GachaVpnService`），而本类在 `core/`、只持有
+     * `Context`。反向依赖会把 core 拽进 vpn 的联调面里。
+     *
+     * 钩子由服务在 `start()` 注册，**触发时求值**（不是注册时求值）⇒ 报告里拿到的是
+     * 「用户点抓诊断」那一刻的状态，而不是开抓那一刻的。
+     *
+     * 返回「段落标题 → 正文」列表；**未注册时报告会写明「本次未接入」，绝不编造数据**。
+     */
+    fun interface ReportSource {
+        fun sections(): List<Pair<String, String>>
+    }
+
+    /** 见 [ReportSource]。null = 未接入（报告会明确标注，不静默留空）。 */
+    var reportSource: ReportSource? = null
 
     private var checkerThread: Thread? = null
 
@@ -296,31 +423,24 @@ class DiagnoseDumper(private val appContext: Context) {
     }
 
     private fun checkAutomatic() {
-        val now = System.currentTimeMillis()
-        val elapsed = now - startedAt.get()
-        if (elapsed < AUTO_SILENCE_MS) return // 起步缓冲期，不开火
-        val pkts = pktCount.get()
-        val s2c = s2cPayloadPkts.get()
+        val elapsed = System.currentTimeMillis() - startedAt.get()
         val st = lastStats.get()
-
-        var hit: String? = null
-        // A1：启动后至今一个包都没见到（隧道空转 / 白名单没拦到）
-        if (pkts == 0L) hit = "A1 隧道建立后 ${elapsed / 1000}s 仍无任何 IP 包"
-        // A2：有不少包却没有一条服务器回包（方向/端口/连接建立异常）
-        else if (pkts >= SYNC_PKT_BEFORE_WARN && s2c == 0L) hit =
-            "A2 累计 ${pkts} 包仍无 S->C 载荷回包"
-        // B1：S->C 切出帧不少却判定恒 0（方向反 / 信封错位 / 协议判错）
-        else if (st.serverFrames >= 3L && st.gachaHits == 0L) hit =
-            "B1 S->C 已切 ${st.serverFrames} 帧但 looks_like_gacha 恒 0"
-
-        if (hit != null) {
-            val msg = "$hit；切分层统计=${st}  ← 若现象可疑请在通知栏点「抓诊断」存原始流量"
-            if (AUTO_TRIGGER_ENABLED) {
-                CaptureLog.w(TAG, "自动落盘: $msg")
-                trigger("auto")
-            } else {
-                CaptureLog.w(TAG, msg)
-            }
+        // 判据本体是纯函数（见 companion 的 automaticHit）；这里只取数、判定、决定落不落盘。
+        val hit = automaticHit(
+            elapsedMs = elapsed,
+            silenceMs = AUTO_SILENCE_MS,
+            packets = pktCount.get(),
+            s2cPayloadPackets = s2cPayloadPkts.get(),
+            syncPacketThreshold = SYNC_PKT_BEFORE_WARN,
+            serverFrames = st.serverFrames,
+            gachaHits = st.gachaHits,
+        ) ?: return
+        val msg = "$hit；切分层统计=${st}  ← 若现象可疑请在通知栏点「抓诊断」存原始流量"
+        if (autoTriggerEnabled) {
+            CaptureLog.w(TAG, "自动落盘: $msg")
+            trigger("auto")
+        } else {
+            CaptureLog.w(TAG, msg)
         }
     }
 
@@ -330,6 +450,7 @@ class DiagnoseDumper(private val appContext: Context) {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val file = File(dir, "dump_${reason}_$stamp.pcap")
         val out = DataOutputStream(BufferedOutputStream(FileOutputStream(file)))
+        var wrote = false
         try {
             writeHeader(out)
             for (r in snapshot) writeRecord(out, r)
@@ -343,11 +464,52 @@ class DiagnoseDumper(private val appContext: Context) {
             }
             out.flush()
             CaptureLog.i(TAG, "已写诊断文件: diagnose/${file.name}")
+            wrote = true
         } catch (e: Exception) {
             CaptureLog.w(TAG, "诊断落盘失败", e)
         } finally {
             try { out.close() } catch (_: Exception) {}
             recording = false
+        }
+        // U11：与 pcap **同名同戳**的 .txt 报告，成对出现。
+        // 刻意放在 finally 之后 ⇒ 即使 pcap 落盘失败也照样出报告（报告里注明「未生成」）：
+        // 「隧道开了但一个包都没抓到」正是最需要这份报告的场景，而它恰恰是 pcap 最小的时候。
+        writeReport(dir, stamp, reason, if (wrote) file.name else null)
+    }
+
+    /**
+     * 写同名 `.txt` 诊断报告（U11，2026-09-18 立项；`10-去重模块设计.md` 16.4 节的落码）。
+     *
+     * 内容 = `[触发]`（本类自己的计数与统计）+ 钩子给的会话段落（会话 / 完整性 / 合并）
+     * + `[日志]`（`CaptureLog` 全文）。
+     *
+     * **这条链路就是 `CaptureLog` 内存环存在的理由** —— 在它之前，环里的打点只有 logcat
+     * 一个出口，「交付不出去」。渲染逻辑抽成了纯函数 [renderReport]（可 JVM 单测），
+     * 本方法只管 IO 与容错：**报告写失败不影响 pcap，也不向调用方抛**。
+     */
+    private fun writeReport(dir: File, stamp: String, reason: String, pcapName: String?) {
+        val txt = File(dir, "dump_${reason}_$stamp.txt")
+        // 钩子自身抛异常也不能让报告落空 —— 用户已经等了 12 秒的录制窗口
+        val sections = try {
+            reportSource?.sections() ?: emptyList()
+        } catch (e: Exception) {
+            listOf("报告上下文" to "（取上下文失败：${e.javaClass.simpleName}: ${e.message}）")
+        }
+        val text = renderReport(
+            reason = reason,
+            pcapName = pcapName,
+            generatedAt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()),
+            packets = pktCount.get(),
+            stats = lastStats.get(),
+            sections = sections,
+            logLines = CaptureLog.snapshot(),
+            logCapacity = CaptureLog.capacity(),
+        )
+        try {
+            FileOutputStream(txt).use { it.write(text.toByteArray(Charsets.UTF_8)) }
+            CaptureLog.i(TAG, "已写诊断报告: diagnose/${txt.name}")
+        } catch (e: Exception) {
+            CaptureLog.w(TAG, "诊断报告(.txt)落盘失败", e)
         }
     }
 

@@ -50,6 +50,12 @@
     <string name="settings_status_idle">未抓包</string>
     <string name="settings_status_running">抓包中</string>
     <string name="settings_status_recording">录包中</string>
+    <!-- 抓包过程中异常写入日志（**2026-09-22 更名**，原名「异常自动落盘」；U2，2026-09-20；09 §3.2 抓包组）——只管自动触发，手动「抓诊断」恒落盘 -->
+    <string name="settings_auto_diagnose">抓包过程中异常写入日志</string>
+    <string name="settings_auto_diagnose_hint">只在抓包进行中生效；手动「抓诊断」不受此开关影响</string>
+    <string name="settings_auto_diagnose_next_effect">已保存，下次开始抓包生效</string>
+    <string name="settings_app_log">App 日志</string>
+    <string name="settings_app_log_hint">开启即写、关闭即停；按天分文件，保留最近 %1$d 天（只存本机，不上传）</string>
 
     <!-- 接管范围弹窗（渠道服支持，2026-09-18） -->
     <string name="target_packages_title">接管范围</string>
@@ -64,10 +70,114 @@
     <string name="channel_switch_proceed">仍要继续</string>
     <string name="channel_switch_saved_warn">已保存。注意：当前用户抓过 %1$s 的数据，继续抓会把两个渠道混在一起（保底与统计会不准）。</string>
 
-    <!-- 数据互通组 -->
+    <!-- ===== 数据互通组（U1 跨端记录互通，2026-09-21 落地） =====
+         文案来源：`U1互通层-契约冻结与实现定案-2026-09-21.md` §8.1。
+
+         ⚠️ 与 §8.1 的**三处有意偏离**（2026-09-21，接线时发现契约清单与既有资源重叠）：
+         · `sync_group_title` **不新增** —— 分组标题沿用上方 `settings_section_sync`（已是「数据互通」）；
+         · `sync_export` / `sync_import` **不新增** —— 本页两行沿用 `settings_export` / `settings_import`，
+           与本页其余行同属 `settings_*` 命名族（同句同义，符合 §8.2「同句」硬要求）。
+         ⇒ 契约 §8.1 里这三个 key 视为**已由既有资源兑现**，不重复定义。 -->
     <string name="settings_export">导出记录</string>
     <string name="settings_import">导入记录</string>
-    <string name="settings_coming_soon">开发中</string>
+
+    <!-- 导出范围对话框（§10-b：落盘 filesDir/exports/，范围二选一） -->
+    <string name="sync_export_range_title">选择导出范围</string>
+    <string name="sync_export_range_current">当前账号（%1$s · %2$d 条）</string>
+    <string name="sync_export_range_all">全部账号（%1$d 个 · %2$d 条）</string>
+    <!-- ⚠️ 以下为 **Android 三步 UI 特有**（PC 是单页对话框，无这些元素 ⇒ §8.1 清单未列）：
+         `sync_export_action` / `sync_export_hint` 是导出对话框的确认按钮与提示（对齐 PC
+         `sync_dialog.ExportSyncDialog` 的「导出」与 hint 同句）；PC 侧该按钮文案亦为「导出」。 -->
+    <string name="sync_export_action">导出</string>
+    <string name="sync_export_hint">导出的文件可在另一端的「导入记录文件」里使用；本机原有记录不受影响。</string>
+    <!-- 分享兜底：落盘已成功，只是设备上没有能接收 ACTION_SEND 的应用（极少见） -->
+    <string name="sync_share_no_app">没有可分享的应用，记录文件已导出到应用内 exports 目录</string>
+    <!-- 保存方式（2026-09-22，Android 特有）：Android 的出口比 PC 多一层 —— PC 用
+         `QFileDialog` 直接挑路径落盘，一次到位；Android 原先只有「分享出去」（FileProvider
+         + ACTION_SEND），设备上没有能接收分享的应用时**完全拿不到文件**（模拟器 / 精简 ROM
+         常见）⇒ 补「存到手机」（SAF ACTION_CREATE_DOCUMENT：零权限、全版本可用、由用户挑
+         目录，与 PC 挑路径体验同构）。范围那三个 key 不动。 -->
+    <string name="sync_export_target_label">保存方式</string>
+    <string name="sync_export_target_save">存到手机</string>
+    <string name="sync_export_target_share">分享出去</string>
+    <!-- 「存到手机」三条兜底文案：成功 / 写失败 / 设备没有文件管理器（引导改用「分享出去」） -->
+    <string name="sync_export_saved">已保存到手机</string>
+    <string name="sync_export_save_failed">保存失败，请重试或改用「分享出去」</string>
+    <string name="sync_export_no_manager">设备上没有文件管理器，请改用「分享出去」</string>
+
+    <!-- 导入 · 第 1 步（方式 / 目标，逐账号；跨账号用「上一账号 / 下一账号」切换，见契约 §6.4 裁定 a） -->
+    <string name="sync_import_step1_title">导入 · 第 %1$d/%2$d 个账号</string>
+    <!-- Android 特有：Step1 副行的「账号名（N 条）」（镜像 PC 账号切换器 item 文本 `f"{name}（{count} 条）"`），
+         以及「导入方式」分组标签（PC 单页有该 QLabel，§8.1 清单未单列）。 -->
+    <string name="sync_account_with_count">%1$s（%2$d 条）</string>
+    <string name="sync_import_mode_label">导入方式</string>
+    <string name="sync_import_mode_new">作为新用户导入</string>
+    <string name="sync_import_mode_merge">合并到已有用户</string>
+    <!-- ⚠️ Android 特有（2026-09-22，契约 `MODE_SKIP`）：第三态「不导入这个用户」。
+         PC 单页对话框同期也加了同名选项（`radio_skip`），但 PC 文案硬编码在代码里。
+         ⚠️ 用词刻意不是「丢弃」—— `discard` 是「合并时败方独有被丢弃的条数」，同词不同义。 -->
+    <string name="sync_import_mode_skip">不导入这个用户</string>
+    <string name="sync_import_target_label">目标用户</string>
+
+    <!-- 导入 · 第 2 步（预览：对照表 + 三集合 + 冲突 + 选哪一份） -->
+    <string name="sync_import_step2_title">导入预览</string>
+    <!-- ⚠️ Android 特有（2026-09-22）：**总览区** —— 预览必须让用户看到「文件里每个账号」的去向，
+         而不是只有当前这一页。（PC 是单页对话框、一次只编一个账号，故 §8.1 清单未列这几个 key。）
+         `sync_overview_merge` = 合并路径的一行摘要（目标账号 · 重合条数 · 将丢弃条数）。 -->
+    <string name="sync_overview_title">本次将导入以下用户</string>
+    <string name="sync_overview_current">当前</string>
+    <string name="sync_overview_merge">合并到「%1$s」· 两边都有 %2$d 条 · 丢弃 %3$d 条</string>
+    <!-- ⚠️ Android 特有（2026-09-22）：总览里「不导入」账号的一行摘要（不参与 compare）。 -->
+    <string name="sync_overview_skip">不导入（文件里 %1$d 条不写入）</string>
+    <string name="sync_overview_conflict">⚠️ 与应用数据不重合</string>
+    <string name="sync_import_from">来自：%1$s · %2$s</string>
+    <string name="sync_col_device">应用里</string>
+    <string name="sync_col_file">文件里</string>
+    <string name="sync_row_latest">最新抽卡</string>
+    <string name="sync_row_count">记录条数</string>
+    <string name="sync_set_both">两边都有 %1$d 条</string>
+    <string name="sync_set_device_only">仅应用有 %1$d 条</string>
+    <string name="sync_set_file_only">仅文件有 %1$d 条</string>
+    <string name="sync_conflict_warn">⚠️ 两边数据不重合，存在冲突</string>
+    <string name="sync_choose_prompt">请选择使用哪一份</string>
+    <string name="sync_choose_file">文件里的（%1$d 条）</string>
+    <string name="sync_choose_device">应用里的（%1$d 条）</string>
+    <string name="sync_discard_warn">⚠️ 未选择的那份将被丢弃（本次丢弃 %1$d 条）</string>
+    <string name="sync_no_anchor_warn">⚠️ 该文件未提供总抽数基准，导入后首次抓包可能重复计入已在文件里的记录</string>
+    <string name="sync_new_as_account">将新建「%1$s」，共 %2$d 条</string>
+    <string name="sync_empty_account">该账号没有记录</string>
+    <!-- ⚠️ Android 特有（2026-09-22）：Step2 详情区在「不导入」路径下，把「对照表 / 三集合 /
+         选哪一份 / 丢弃」整块换成这一行说明（契约 `MODE_SKIP`）。 -->
+    <string name="sync_skip_hint">该用户的记录不会写入应用，应用里原有的也不变</string>
+
+    <!-- 步进 / 提交 / 结果（`sync_next` 为 Android 三步 UI 特有：PC 单页无「下一步」） -->
+    <string name="sync_next">下一步</string>
+    <!-- ⚠️ Android 特有（2026-09-22）：Step1 的「下一步」须**浏览完全部用户**才可点。
+         逐账号页如果只看一眼第一个账号就提交，后面账号的导入方式会被默认值静默带走。
+         判据 = 访问过的账号页数（§6.2-c 的「不清空已选」不变，二者正交）。 -->
+    <string name="sync_browse_all_hint">请先查看全部用户（已看 %1$d/%2$d）</string>
+    <string name="sync_back">返回上一步</string>
+    <string name="sync_confirm_import">确认导入</string>
+    <string name="sync_done_title">导入完成</string>
+    <string name="sync_done_line">%1$s：%2$d 条</string>
+    <string name="sync_done_backup">已自动备份一次，可在「数据清理 → 还原」里找回</string>
+    <!-- ⚠️ Android 特有（2026-09-22，契约 `MODE_SKIP`）：结果页两条。
+         `sync_done_nothing` = 全部账号都选了「不导入」时**一个字节都没写**，用它在结果页替代明细；
+         `sync_done_skipped` = 部分账号按选择未导入时的追加行（条数从 UI 层 `choices` 自算，**不改契约**——
+         `SKIP` 账号不在计划里，`plan` 里根本找不到它们）。 -->
+    <string name="sync_done_nothing">没有导入任何内容</string>
+    <string name="sync_done_skipped">另有 %1$d 个用户按选择未导入</string>
+
+    <!-- 错误（§10-a：用 AlertDialog，不用 Toast） -->
+    <string name="sync_err_bad_format">不是本工具导出的记录文件</string>
+    <string name="sync_err_version">文件由更新版本导出，请先升级本工具</string>
+    <string name="sync_err_no_accounts">文件里没有账号数据</string>
+    <string name="sync_err_corrupt">文件内容损坏（第 %1$d 个账号）</string>
+    <!-- 兜底：只可能在「调用方 bug（choices 不合法）」时出现 —— applyPlan 内部把写盘异常
+         全兜成 ok=false + 人话 error，故走到这里时磁盘**未动**（不写"已回滚"，那是另一条路径的文案）。 -->
+    <string name="sync_err_apply">导入失败，数据未改动</string>
+    <!-- 置灰理由（沿用 account_need_stop 的两字口径，此处用于整组入口） -->
+    <string name="sync_disabled_capturing">抓包中不可操作</string>
 
     <!-- 元数据组 -->
     <string name="settings_metadata_version">数据版本</string>
@@ -99,6 +209,7 @@
     <string name="clean_kind_records">录包文件</string>
     <string name="clean_kind_diagnose">诊断包</string>
     <string name="clean_kind_cache">元数据缓存</string>
+    <string name="clean_kind_applog">App 日志</string>
     <string name="clean_kind_empty">无文件</string>
     <string name="clean_kind_summary">%1$d 项 · %2$s</string>
     <string name="clean_select_all">全选（已选 %1$d / %2$d）</string>
@@ -117,9 +228,38 @@
     <!-- 关于组 + 页脚 -->
     <string name="settings_app_version">应用版本</string>
     <string name="settings_version_value">%1$s (%2$d)</string>
+    <string name="settings_announcements">公告</string>
+    <string name="settings_check_update">检查更新</string>
     <string name="settings_faq">常见问题</string>
     <string name="open_url_no_handler">未找到可打开链接的应用</string>
     <string name="settings_footer_sponsor">本工具由金麟街云老板独家赞助</string>
+
+    <!-- 更新提示与公告（§15 更新设计）：横幅 / 更新弹窗 / 公告弹窗 / 公告子页 / 手动检查 -->
+    <string name="update_banner_new">发现新版本 %1$s（当前 %2$s）</string>
+    <string name="update_banner_view">查看</string>
+    <string name="update_dialog_title">发现新版本</string>
+    <string name="update_dialog_version">%1$s → %2$s</string>
+    <string name="update_dialog_force_hint">⚠️ 本次为强制更新，未更新前「开始抓包」将被禁用（仍可查看历史记录）。</string>
+    <string name="update_dialog_download">去下载</string>
+    <string name="update_dialog_later">稍后</string>
+    <string name="update_dialog_not_ready">新版准备中</string>
+    <string name="update_dialog_not_ready_hint">新版本安装包尚未就绪，请稍后再来检查。</string>
+    <string name="update_checking">检查中…</string>
+    <string name="update_check_latest">已是最新</string>
+    <string name="update_check_found">发现新版本 %1$s</string>
+    <string name="update_check_failed">未能检查（网络不可用或服务未就绪）</string>
+    <string name="ann_pinned_badge">📌 置顶公告（须确认后可关闭）</string>
+    <string name="ann_update_badge">公告</string>
+    <string name="ann_confirm">我已了解并同意</string>
+    <string name="ann_dont_prompt">不再提示</string>
+    <string name="ann_mark_all">全部不再提示</string>
+    <string name="ann_close">关闭</string>
+    <string name="ann_close_blocked">请先阅读并点击所有置顶公告的「我已了解并同意」后再关闭。</string>
+    <string name="ann_contact">如有问题请反馈至邮箱 klascher@163.com</string>
+    <string name="ann_list_title">公告</string>
+    <string name="ann_list_empty">暂无公告</string>
+    <string name="ann_type_pinned">置顶</string>
+    <string name="ann_type_update">更新</string>
 
     <!-- ===== 统计页（Tab3）：顶部「用户管理」组 + 统计内容 ===== -->
     <string name="stats_title">统计</string>

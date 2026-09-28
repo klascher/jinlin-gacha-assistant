@@ -2,11 +2,12 @@ package com.jinlin.gacha.assistant.persistence
 
 import com.jinlin.gacha.assistant.core.dedup.MiniJson
 import java.io.File
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** 「数据清理」子页可治理的四类文件（对齐 `09-设置模块设计.md` §3.5 / §15）。 */
+/** 「数据清理」子页可治理的五类文件（对齐 `09-设置模块设计.md` §3.5 / §15；第五类 [CleanKind.APP_LOG] 为 2026-09-22 新增）。 */
 enum class CleanKind {
     /** 抽卡数据**备份**（副本，`users/<id>_<stamp>[_N].json`）—— 删它不动任何现有记录。 */
     BACKUP,
@@ -16,7 +17,7 @@ enum class CleanKind {
      *
      * ⚠️ **数据层保留、UI 默认不展示**（2026-09-18 用户定案：pcap 永远不对用户产生）——
      * 展示开关在 `ui/screens/DataCleanupScreen.kt` 的 `HIDDEN_KINDS`；本类与 `StorageCleanerTest`
-     * 一概不动（仍扫四类、守卫不变）。故**看到本枚举在 UI 上不出现，属预期，不是死代码**。
+     * 一概不动（仍扫五类、守卫不变）。故**看到本枚举在 UI 上不出现，属预期，不是死代码**。
      */
     CAPTURE_PCAP,
 
@@ -25,6 +26,15 @@ enum class CleanKind {
 
     /** 元数据缓存（`cache/role_cache.json`）—— 删后下次渲染自动从 APK assets 重新播种。 */
     META_CACHE,
+
+    /**
+     * **App 日志**（`applog/app-<yyyyMMdd>.txt`，2026-09-22 新增，第五类）。
+     *
+     * 开关打开时由 `persistence/AppLog` 按天写入的运行日志。**与会话无关** —— 开抓包之前、
+     * 停抓之后都在写。超出保留天数时由 `AppLog` 调本类 [delete] 清理（走的正是同一条三闸），
+     * 也可由用户在本页手动清。
+     */
+    APP_LOG,
 }
 
 /**
@@ -84,6 +94,7 @@ data class CleanResult(
  * | 副本 | `users/<id>_<stamp>[_N].json` | ✅ | 删它只减少「可回退步数」，当前记录一条不丢 |
  * | 诊断产物 | `records下*.pcap`、`diagnose下*.pcap` | ✅ | 纯抓包留痕，与业务数据无关 |
  * | 可重建缓存 | `cache/role_cache.json` | ✅ | 下次渲染由 `MetaLoader` 自动回退出厂版本 |
+ * | App 日志 | `applog/app-<yyyyMMdd>.txt` | ✅ | 运行日志；按天分文件，超保留天数自动清，也可手动清 |
  * | **权威数据** | `users/<id>.json`（记录本体）、`profiles.json`、`settings.json`、`char_shields.json`、`pool_assignments.json` | ❌ **永不** | 删了数据直接消失。记录本体只在**统计页 → 用户管理 → 清空当前账号历史**（账号维度、有备份、可还原） |
  *
  * 与 2026-09-16「方案 A 去掉抽卡记录」**不冲突**：那次去掉的是**记录本体**（权威数据），
@@ -97,11 +108,14 @@ data class CleanResult(
  * ⚠️ 第 2 条同时排除了**记录本体** `users/<id>.json`（无时间戳段，不匹配备份规约）—— 这是
  * 「记录本体永不在此页删」的**机械保证**，不依赖调用方自觉。
  *
- * ### 不入列表的两类（刻意）
+ * ### 不入列表的一类（刻意；另有「日志」一条 2026-09-22 已改判，见下）
  * - **已删账号的孤儿存档**：与备份**完全同形**（`ProfileStore.uniqueArchive` 与 PC 的
  *   `profiles._unique_archive` 命名一致），但它是该账号数据的**唯一副本**，删掉 = 永久丢失。
  *   [scanBackups] 按**注册表 id 前缀**匹配，故孤儿天然不入列表（详见 `09` §15「孤儿存档」）。
- * - **日志**：`core/CaptureLog` 只写内存环形缓冲（200 行）+ logcat，**全程不落盘** ⇒ 无可清理物。
+ * - ~~**日志**~~ **❌ 2026-09-22 改判**：原写「`core/CaptureLog` 只写内存环 + logcat、全程不落盘 ⇒
+ *   无可清理物」—— `CaptureLog` 本身**仍不落盘**，但同日新增了 **App 级日志**（`persistence/AppLog`
+ *   写 `applog/app-<yyyyMMdd>.txt`）⇒ 这一类**入列表**（[CleanKind.APP_LOG]），且 `AppLog` 的过期清理
+ *   也走本类 [delete] 的单点三闸。
  *
  * ### 并发
  * 本类**不 new `HistoryStore`**，只操作文件系统 —— 以免给「同一文件多写入者」这个已登记的不变量
@@ -132,6 +146,11 @@ class StorageCleaner(
         private const val RECORDS_DIR = "records"
         private const val DIAG_DIR = "diagnose"
 
+        /** App 日志子目录与文件名前后缀（与 `AppLog.DIR_NAME` / `PREFIX` / `SUFFIX` 同值，改动须同改）。 */
+        private const val APP_LOG_DIR = "applog"
+        private const val APP_LOG_PREFIX = "app-"
+        private const val APP_LOG_SUFFIX = ".txt"
+
         /**
          * 永不删清单（**直接位于 `filesDir` 下的权威数据**）。
          *
@@ -160,10 +179,16 @@ class StorageCleaner(
         private val PCAP_STAMP = Regex("""^(.+)_(\d{8}_\d{6})\.pcap$""")
 
         private val TS_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+
+        /** App 日志名规约 `app-<yyyyMMdd>.txt`（判据与 `AppLog.parseDay` 同源，改动须同改）。 */
+        private val APP_LOG_NAME = Regex("^app-\\d{8}\\.txt$")
+
+        /** App 日志名里的日期段（文件名 → 时刻用）。 */
+        private val DAY_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
     }
 
     /**
-     * 扫描四类文件。
+     * 扫描五类文件。
      *
      * @param profileNames 账号 id → 账号名（来自 `ProfileStore`）；用于给备份标注账号名，
      *   同时**界定哪些备份算「有效」** —— 不在表内的 id 即已删账号的孤儿存档，不入列表。
@@ -180,6 +205,7 @@ class StorageCleaner(
             scanPcaps(externalDir?.let { File(it, DIAG_DIR) }, CleanKind.DIAG_PCAP),
         ),
         CleanCategory(CleanKind.META_CACHE, scanMetaCache()),
+        CleanCategory(CleanKind.APP_LOG, scanAppLogs()),
     )
 
     /**
@@ -261,6 +287,29 @@ class StorageCleaner(
             }
     }
 
+    /**
+     * 扫 App 日志（`applog/app-<yyyyMMdd>.txt`，2026-09-22 新增）。
+     *
+     * **只认规约名**：`app-notes.txt` 这类手写文件不入列表（[nameMatches] 用同一条正则再校一次，
+     * 即便调用方传进来也删不掉）—— 与「备份必须带时间戳段」是同一种机械保证。
+     */
+    private fun scanAppLogs(): List<CleanItem> {
+        val dir = externalDir?.let { File(it, APP_LOG_DIR) } ?: return emptyList()
+        if (!dir.isDirectory) return emptyList()
+        return (dir.listFiles() ?: emptyArray())
+            .filter { it.isFile && APP_LOG_NAME.matches(it.name) }
+            .sortedByDescending { it.name }
+            .map { f ->
+                val day = f.name.substring(APP_LOG_PREFIX.length, f.name.length - APP_LOG_SUFFIX.length)
+                CleanItem(
+                    file = f,
+                    bytes = f.length(),
+                    kind = CleanKind.APP_LOG,
+                    timestamp = parseDay(day),
+                )
+            }
+    }
+
     /** 扫元数据缓存（固定单文件）。 */
     private fun scanMetaCache(): List<CleanItem> {
         val f = File(File(filesDir, CACHE_DIR), CACHE_FILENAME)
@@ -287,6 +336,7 @@ class StorageCleaner(
         CleanKind.META_CACHE -> File(filesDir, CACHE_DIR)
         CleanKind.CAPTURE_PCAP -> externalDir?.let { File(it, RECORDS_DIR) }
         CleanKind.DIAG_PCAP -> externalDir?.let { File(it, DIAG_DIR) }
+        CleanKind.APP_LOG -> externalDir?.let { File(it, APP_LOG_DIR) }
     }
 
     /**
@@ -304,6 +354,7 @@ class StorageCleaner(
         CleanKind.BACKUP -> BACKUP_NAME.matches(name)
         CleanKind.CAPTURE_PCAP, CleanKind.DIAG_PCAP -> name.endsWith(PCAP)
         CleanKind.META_CACHE -> name == CACHE_FILENAME
+        CleanKind.APP_LOG -> APP_LOG_NAME.matches(name)
     }
 
     /** 是否为「永不删清单」里的权威数据（须直接位于 `filesDir` 下）。 */
@@ -328,6 +379,10 @@ class StorageCleaner(
         if (parts.size == 3 && parts[2].toIntOrNull() != null) s = parts.take(2).joinToString("_")
         return runCatching { LocalDateTime.parse(s, TS_FMT) }.getOrNull()
     }
+
+    /** 从 App 日志名的日期段解析当天零点（`yyyyMMdd`）；不合规返回 null。 */
+    private fun parseDay(dayPart: String): LocalDateTime? =
+        runCatching { LocalDate.parse(dayPart, DAY_FMT).atStartOfDay() }.getOrNull()
 
     /** 读备份内的记录条数（读不出按 0，与 `HistoryStore.countRecords` 同口径）。 */
     private fun countRecords(f: File): Int = runCatching {

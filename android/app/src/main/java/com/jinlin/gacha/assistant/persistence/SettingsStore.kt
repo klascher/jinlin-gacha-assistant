@@ -10,7 +10,8 @@ import java.io.File
  * 设置项快照（不可变值对象）。**改动一律走 [SettingsStore.update]**，页面只读渲染。
  *
  * 键名对齐 PC `gacha_exporter/storage/settings.py`（同名同构，未来 PC↔Android 可直接互认）：
- * `last_capture` 与 PC 同名同结构（`{profile_id: iso_str}`）；`auto_diagnose` / `metadata_*` /
+ * `last_capture` 与 PC 同名同结构（`{profile_id: iso_str}`）；`auto_diagnose` / `app_log_enabled` /
+ * `metadata_*` /
  * `target_packages` / `guide_seen_version` 是 mobile 新增 —— PC 侧读到未知键会原样忽略，
  * 不影响其读写（PC 只在自己的机器上跑，两边不会同时写同一个文件）。
  * ⚠️ 「加新键安全」这条**只对新增键成立**：改**已有键的值类型**（例如把 `last_capture`
@@ -22,8 +23,19 @@ import java.io.File
  * - **`endpoints` 不持久化**：按 09 设计稿 §8-Q3 决策不做（冷启动端点归零，重抓即恢复）。
  */
 data class Settings(
-    /** 异常自动落盘（抓包组开关；默认 false，保持既有行为）。 */
+    /** 「抓包过程中异常写入日志」（抓包组开关；默认 false，保持既有行为）。 */
     val autoDiagnose: Boolean = false,
+    /**
+     * **App 级日志**开关（2026-09-22 新增，mobile 独有）。**默认 false**。
+     *
+     * 与 [autoDiagnose] 是**两件事**，互不影响：
+     * - [autoDiagnose] 只管**抓包过程中**异常判据命中时，要不要自动落 pcap + 报告；
+     * - 本项只管 **App 日志文件写不写**（`applog/app-<yyyyMMdd>.txt`，见 `AppLog`）——
+     *   **会话之外也写**（开抓包之前 / 停抓之后都有），且**即改即生效**。
+     *
+     * 键名 `app_log_enabled`（PC 读到未知键会原样忽略，不影响其读写）。
+     */
+    val appLogEnabled: Boolean = false,
     /** 每账号最近一次抓包完成时间（展示用）。 */
     val lastCapture: Map<String, String> = emptyMap(),
     /** 元数据版本（形如 `v1.0.4`）；空串 = 未拉取。 */
@@ -59,6 +71,15 @@ data class Settings(
      * 后者那刻用户**可能已经站在卡池页里了**，弹了等于叫他全部重来。
      */
     val guideSeenVersion: Int = 0,
+    /**
+     * `prompt` 更新弹窗**已确认过的服务端版本号**（§15 更新设计，mobile 独有键）。
+     *
+     * 语义照搬 PC `storage/settings.py` 的 `acknowledged_version`：启动检查发现
+     * `latest != acknowledged` 才弹 `prompt` 更新弹窗（用户点「去下载」或「稍后」都记），
+     * 同版本不再反复打扰；版本追平后由检查逻辑自然清场。
+     * **只影响 `prompt`**：`force` 弹窗每次启动都弹（PC 同款）、`silent` 完全不弹。
+     */
+    val acknowledgedVersion: String = "",
 )
 
 /**
@@ -83,6 +104,8 @@ class SettingsStore(private val file: File) {
         const val FILE_NAME = "settings.json"
 
         private const val KEY_AUTO_DIAGNOSE = "auto_diagnose"
+        /** App 级日志开关（2026-09-22 新增，mobile 独有）。 */
+        private const val KEY_APP_LOG = "app_log_enabled"
         private const val KEY_LAST_CAPTURE = "last_capture"
         private const val KEY_METADATA_VERSION = "metadata_version"
         private const val KEY_METADATA_FETCHED_AT = "metadata_fetched_at"
@@ -93,6 +116,8 @@ class SettingsStore(private val file: File) {
          */
         private const val KEY_TARGET_PACKAGES_LEGACY = "target_packages"
         private const val KEY_GUIDE_SEEN_VERSION = "guide_seen_version"
+        /** prompt 更新弹窗已确认的服务端版本号（§15；PC 同名键 `acknowledged_version`）。 */
+        private const val KEY_ACKNOWLEDGED_VERSION = "acknowledged_version"
 
         /** UI 与 Service 共用的进程级实例（保证两边看到同一份 StateFlow）。 */
         @Volatile
@@ -121,6 +146,9 @@ class SettingsStore(private val file: File) {
     /** 异常自动落盘开关快捷读。 */
     val autoDiagnose: Boolean get() = _state.value.autoDiagnose
 
+    /** App 日志开关快捷读（2026-09-22 新增）。 */
+    val appLogEnabled: Boolean get() = _state.value.appLogEnabled
+
     /**
      * 唯一写路径：`transform` 产出新快照 → 更新 StateFlow → 落盘。
      * `transform` 结果与原值相等时**不动 StateFlow、不写盘**（幂等；避免无谓 IO 与重组）。
@@ -135,8 +163,16 @@ class SettingsStore(private val file: File) {
 
     // —— 便捷写入口（页面直接调用，无需拼 transform）——
 
-    /** 切换「异常自动落盘」（抓包组开关；下次开始抓包时生效，见 G2）。 */
+    /** 切换「抓包过程中异常写入日志」（抓包组开关；下次开始抓包时生效，见 G2）。 */
     fun setAutoDiagnose(on: Boolean) = update { it.copy(autoDiagnose = on) }
+
+    /**
+     * 切换「App 日志」（**即改即生效**，不是「下次生效」）。
+     *
+     * ⚠️ 本方法**只写设置**；真正起停落盘器还要同时调 `AppLog.setEnabled`（设置页那两行一起写）。
+     * 不在这里联动的原因：本类是**纯 JVM 可测**的存储层，不该去 new 一个写盘器 / 持 `Context`。
+     */
+    fun setAppLogEnabled(on: Boolean) = update { it.copy(appLogEnabled = on) }
 
     /** 记录某账号最近一次抓包完成时间。 */
     fun setLastCapture(profileId: String, at: String) =
@@ -161,6 +197,13 @@ class SettingsStore(private val file: File) {
     fun setGuideSeenVersion(version: Int) =
         update { it.copy(guideSeenVersion = version) }
 
+    /**
+     * 记录 `prompt` 更新弹窗已确认的服务端版本号（点「去下载」/「稍后」都记，§15 §4.3②）。
+     * 同版本不再弹；版本追平后由更新决策自然不再弹（无需清键）。
+     */
+    fun setAcknowledgedVersion(version: String) =
+        update { it.copy(acknowledgedVersion = version) }
+
     /** 外部改动（如导入覆盖）后重新从磁盘加载。 */
     @Synchronized
     fun reload() {
@@ -180,6 +223,7 @@ class SettingsStore(private val file: File) {
         val map = root as? Map<*, *> ?: return Settings()
         return Settings(
             autoDiagnose = (map[KEY_AUTO_DIAGNOSE] as? Boolean) ?: false,
+            appLogEnabled = (map[KEY_APP_LOG] as? Boolean) ?: false,
             lastCapture = toStringMap(map[KEY_LAST_CAPTURE]),
             metadataVersion = (map[KEY_METADATA_VERSION] as? String) ?: "",
             metadataFetchedAt = (map[KEY_METADATA_FETCHED_AT] as? String) ?: "",
@@ -188,6 +232,7 @@ class SettingsStore(private val file: File) {
                 ?: toStringList(map[KEY_TARGET_PACKAGES_LEGACY]).firstOrNull(),
             // MiniJson 把整数解码成 Long ⇒ 用 Number 接（Int / Long / Double 都吃得下）
             guideSeenVersion = (map[KEY_GUIDE_SEEN_VERSION] as? Number)?.toInt() ?: 0,
+            acknowledgedVersion = (map[KEY_ACKNOWLEDGED_VERSION] as? String) ?: "",
         )
     }
 
@@ -203,11 +248,13 @@ class SettingsStore(private val file: File) {
 
     private fun buildPayload(s: Settings): Map<String, Any?> = linkedMapOf(
         KEY_AUTO_DIAGNOSE to s.autoDiagnose,
+        KEY_APP_LOG to s.appLogEnabled,
         KEY_LAST_CAPTURE to LinkedHashMap<String, Any?>(s.lastCapture),
         KEY_METADATA_VERSION to s.metadataVersion,
         KEY_METADATA_FETCHED_AT to s.metadataFetchedAt,
         KEY_TARGET_PACKAGE to s.targetPackage,
         KEY_GUIDE_SEEN_VERSION to s.guideSeenVersion.toLong(),
+        KEY_ACKNOWLEDGED_VERSION to s.acknowledgedVersion,
     )
 
     /**

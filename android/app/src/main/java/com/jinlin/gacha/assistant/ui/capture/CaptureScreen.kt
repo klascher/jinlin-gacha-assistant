@@ -54,18 +54,26 @@ import com.jinlin.gacha.assistant.core.ChannelSwitchGuard
 import com.jinlin.gacha.assistant.core.DedupSnapshot
 import com.jinlin.gacha.assistant.core.HealthReason
 import com.jinlin.gacha.assistant.core.HealthState
+import com.jinlin.gacha.assistant.core.UpdateGate
 import com.jinlin.gacha.assistant.core.gapCoveredByHistory
 import com.jinlin.gacha.assistant.core.health
+import com.jinlin.gacha.assistant.network.UpdateCenter
+import com.jinlin.gacha.assistant.network.UpdateInfo
 import com.jinlin.gacha.assistant.persistence.HistoryStore
 import com.jinlin.gacha.assistant.persistence.ProfileStore
 import com.jinlin.gacha.assistant.persistence.SettingsStore
 import com.jinlin.gacha.assistant.persistence.UnknownIdStore
+import com.jinlin.gacha.assistant.ui.screens.DOWNLOAD_URL
+import com.jinlin.gacha.assistant.ui.screens.appVersion
 import com.jinlin.gacha.assistant.ui.screens.healthFixLine
 import com.jinlin.gacha.assistant.ui.screens.healthReasonLine
+import com.jinlin.gacha.assistant.ui.screens.openUrl
 import com.jinlin.gacha.assistant.ui.screens.pagesCoveredLine
 import com.jinlin.gacha.assistant.ui.screens.pageText
 import com.jinlin.gacha.assistant.ui.screens.rememberOwnedSession
 import com.jinlin.gacha.assistant.ui.screens.TargetPackagesDialog
+import com.jinlin.gacha.assistant.ui.screens.UpdateDialog
+import com.jinlin.gacha.assistant.ui.screens.UpdateDialogMode
 import com.jinlin.gacha.assistant.ui.stats.StatsReport
 import com.jinlin.gacha.assistant.ui.stats.statsReport
 import com.jinlin.gacha.assistant.ui.theme.ColorWarpedRed
@@ -98,6 +106,23 @@ fun CaptureScreen() {
     val recording = svc.recording
     // 首次引导是否已读（U5 §17.7）：`guide_seen_version < GUIDE_VERSION` ⇒ 还没看过，展示三步骤卡。
     val settings by SettingsStore.get(context).state.collectAsState()
+
+    // —— 更新决策（§15 §4.3①/②）：顶部横幅 + force 时禁「开始抓包」——
+    // 数据源 = 本次启动那次拉取（UpdateCenter 会话内存）；决策与启动流程同一套 UpdateGate 口径。
+    val (appVersionName, _) = remember { appVersion(context) }
+    val updateInfo by UpdateCenter.get(context).updateInfo.collectAsState()
+    val updateDecision = remember(updateInfo, settings.acknowledgedVersion, appVersionName) {
+        UpdateGate.decide(
+            latestVersion = updateInfo?.latestVersion,
+            currentVersion = appVersionName,
+            updateType = updateInfo?.updateType,
+            ready = updateInfo?.ready ?: false,
+            acknowledgedVersion = settings.acknowledgedVersion,
+        )
+    }
+    val forceBlocked = updateDecision is UpdateGate.Decision.ForceBlocking
+    // 横幅「查看」再弹更新弹窗（启动流程之外的手动入口）
+    var showUpdateDialog by remember { mutableStateOf(false) }
     // 门 1 判据（渠道服支持，2026-09-18）：三态 Resolution，见 TargetPackages。
     // `remember(pickRefresh)` 保持既有「进入本页取一次」语义 —— 切 Tab 会重建组合，故在设置页
     // 改完接管范围、切回来即刷新；本页选完渠道后 pickRefresh++ 也能就地刷新。
@@ -197,6 +222,22 @@ fun CaptureScreen() {
                 Text(text = accountName, fontSize = 12.sp, color = colors.onSurfaceMuted)
             }
         }
+
+        // —— 更新横幅（§15 §4.3①）：仅 prompt/force 且有新版时渲染，silent 不显示 ——
+        // 常驻到版本追平（决策 UpToDate 即消失）；「查看」弹更新弹窗（手动入口）。
+        if (updateDecision is UpdateGate.Decision.Prompt ||
+            updateDecision is UpdateGate.Decision.ForceBlocking
+        ) {
+            updateInfo?.let { info ->
+                UpdateBanner(
+                    info = info,
+                    currentVersion = appVersionName,
+                    colors = colors,
+                    onView = { showUpdateDialog = true },
+                )
+            }
+        }
+
         StatusBadge(
             running = running,
             recording = recording,
@@ -207,8 +248,9 @@ fun CaptureScreen() {
         // —— 顶栏：启停 + 录包 ——
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                // needPickChannel 时**保持可点**：点了先让用户选渠道，而不是像「未安装」那样直接置灰
-                enabled = !running && (gameInstalled || needPickChannel),
+                // needPickChannel 时**保持可点**：点了先让用户选渠道，而不是像「未安装」那样直接置灰。
+                // force 更新未追平时整体禁用（§3-C 语义照搬 PC：禁「开始抓包」，记录/统计/导出保留）
+                enabled = !running && !forceBlocked && (gameInstalled || needPickChannel),
                 onClick = {
                     when {
                         needPickChannel -> showPickChannel = true
@@ -304,6 +346,30 @@ fun CaptureScreen() {
 
     if (showUnknownDialog) {
         UnknownIdDialog(report = report, onDismiss = { showUnknownDialog = false })
+    }
+
+    // 横幅「查看」→ 更新弹窗（手动入口；模式随决策：forceBlocking 不可关，prompt 可关）。
+    // prompt 关闭语义与启动流程一致：两个按钮都记 acknowledged（同版本不再弹）。
+    if (showUpdateDialog) {
+        updateInfo?.let { info ->
+            UpdateDialog(
+                info = info,
+                mode = if (forceBlocked) UpdateDialogMode.Force else UpdateDialogMode.Prompt,
+                currentVersion = appVersionName,
+                colors = colors,
+                onDownload = {
+                    if (!forceBlocked) {
+                        SettingsStore.get(context).setAcknowledgedVersion(info.latestVersion)
+                    }
+                    openUrl(context, DOWNLOAD_URL)
+                    showUpdateDialog = false
+                },
+                onLater = {
+                    SettingsStore.get(context).setAcknowledgedVersion(info.latestVersion)
+                    showUpdateDialog = false
+                },
+            )
+        }
     }
 
     if (showStopDialog) {
@@ -980,4 +1046,36 @@ private fun sendService(context: Context, action: String) {
         context,
         Intent(context, GachaVpnService::class.java).setAction(action),
     )
+}
+/**
+ * 更新横幅（§15 §4.3①）—— 抓包页顶部：`发现新版本 x.y.z（当前 x.y.z）  [查看]`。
+ * 仅 prompt/force 且有新版时由 [CaptureScreen] 渲染（silent 不显示）；常驻到版本追平。
+ * force 未追平时「开始抓包」同步置灰 —— 文案说明在更新弹窗里，这里保持一行不占空间。
+ */
+@Composable
+private fun UpdateBanner(
+    info: UpdateInfo,
+    currentVersion: String,
+    colors: JinlinColors,
+    onView: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(R.string.update_banner_new, info.latestVersion, currentVersion),
+                fontSize = 12.sp,
+                color = colors.gold,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onView) {
+                Text(text = stringResource(R.string.update_banner_view), fontSize = 12.sp)
+            }
+        }
+    }
 }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 自适应图标背景色：取插画最外圈平均色（插画本身全幅铺满，此色仅遮罩动画时露出） -->
+    <color name="ic_launcher_background">#B5A9A1</color>
+</resources>

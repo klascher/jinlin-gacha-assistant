@@ -1,6 +1,7 @@
 package com.jinlin.gacha.assistant.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,10 +11,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -110,4 +113,89 @@ internal fun ActionRow(
 @Composable
 internal fun RowDivider(colors: JinlinColors) {
     HorizontalDivider(color = colors.divider, modifier = Modifier.padding(start = 14.dp))
+}
+
+/**
+ * 开关行：左标签（+ 可选副行说明）/ 右 `Switch`（U2，2026-09-20）。
+ *
+ * 整行可拨：用 `toggleable` 让**行**当命中区、`Switch` 传 `onCheckedChange = null`
+ * —— 否则行与开关各接一次点击，可能双双翻转（净效果=没变）。
+ * [enabled] = false 时整体置灰且不可拨（与 [ActionRow] 同款占位语义）。
+ */
+@Composable
+internal fun SwitchRow(
+    label: String,
+    sub: String?,
+    checked: Boolean,
+    enabled: Boolean,
+    colors: JinlinColors,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(value = checked, enabled = enabled, role = Role.Switch) { onCheckedChange(it) }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                fontSize = 14.sp,
+                color = if (enabled) colors.onSurface else colors.onSurfaceMuted,
+            )
+            if (sub != null) {
+                Text(
+                    text = sub,
+                    fontSize = 11.sp,
+                    color = colors.onSurfaceDim,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+    }
+}
+
+/**
+ * 单选行：左「◉ / ○」+ 右标签，整行可点（U1 数据互通，2026-09-21 新增）。
+ *
+ * 为什么与 [SwitchRow] 分开：选项**互斥**且需要「一个都不选」的中间态（导入方式 /
+ * 导出范围），用 `Switch` 表达不了。符号口径沿用 [TargetPackagesDialog] 既有的
+ * `◉` / `○` —— 那就是本项目的单选语言，不另起一套。
+ *
+ * [enabled] = false 时整行置灰且不可点（与 [ActionRow] / [SwitchRow] 同款占位语义）。
+ */
+@Composable
+internal fun ChoiceRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean,
+    colors: JinlinColors,
+    onSelect: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled) { onSelect() }
+            .padding(vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = if (checked) "◉" else "○",
+            fontSize = 15.sp,
+            color = when {
+                !enabled -> colors.onSurfaceMuted
+                checked -> colors.gold
+                else -> colors.onSurfaceDim
+            },
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            color = if (enabled) colors.onSurface else colors.onSurfaceMuted,
+        )
+    }
 }
