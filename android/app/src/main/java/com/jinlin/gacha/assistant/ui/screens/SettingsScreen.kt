@@ -37,6 +37,7 @@ import com.jinlin.gacha.assistant.network.MetadataClient
 import com.jinlin.gacha.assistant.network.MetaErrorReason
 import com.jinlin.gacha.assistant.network.MetadataException
 import com.jinlin.gacha.assistant.network.UpdateCenter
+import com.jinlin.gacha.assistant.network.metadataFetchedAtNow
 import com.jinlin.gacha.assistant.network.UpdateInfo
 import com.jinlin.gacha.assistant.persistence.AppLog
 import com.jinlin.gacha.assistant.persistence.HistoryStore
@@ -47,8 +48,6 @@ import com.jinlin.gacha.assistant.ui.theme.LocalJinlinColors
 import com.jinlin.gacha.assistant.vpn.GachaVpnService
 import com.jinlin.gacha.assistant.vpn.TargetPackages
 import java.io.File
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -307,7 +306,7 @@ private fun SettingsContent(
                                 onSuccess = { meta ->
                                     val version = meta.version.ifEmpty { "?" }
                                     SettingsStore.get(context)
-                                        .setMetadata(version, fetchedAtNow())
+                                        .setMetadata(version, metadataFetchedAtNow())
                                     Toast.makeText(
                                         context,
                                         context.getString(R.string.settings_metadata_updated, version),
@@ -566,10 +565,6 @@ internal fun openUrl(context: Context, url: String) {
 /** 联网前数据显示：读缓存里的版本（出厂种子或上次拉取）；无缓存时空串。 */
 private fun readCachedMetaVersion(context: Context): String =
     MetaLoader.read(MetaLoader.cacheFile(context.filesDir))?.version.orEmpty()
-
-/** 「最后拉取」时间文本（本地时区，对齐现有展示风格）。 */
-private fun fetchedAtNow(): String = LocalDateTime.now().format(FETCHED_AT_FMT)
-private val FETCHED_AT_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
 /** 把 [MetadataException] 的 reason 映射成用户文案（对齐 11 §3 失败分层）。 */
 private fun metadataErrorText(context: Context, e: Throwable): String {

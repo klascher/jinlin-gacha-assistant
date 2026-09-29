@@ -7,6 +7,7 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 元数据拉取失败的原因 → 用户文案（对齐 `mobile/docs/11-元数据联网刷新设计.md` §3，
@@ -64,6 +65,13 @@ object MetadataClient {
     private const val HDR_SIG = "X-Auth-Signature"
 
     /**
+     * 全局拉取互斥（2026-09-29 起）：启动自动拉取（UpdateCenter.checkNow）与设置页
+     * 手动拉取 / 「检查更新」可能并发，串行化避免重复请求与写缓存竞争。
+     * 慢网下自动拉取持锁最长 10s，手动拉取排队等待（按钮 loading 态覆盖此体验）。
+     */
+    private val fetchMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
      * 拉取并覆盖缓存。
      *
      * @param cacheFile 目标缓存（生产 = `MetaLoader.cacheFile(context.filesDir)`）
@@ -75,8 +83,8 @@ object MetadataClient {
         cacheFile: File,
         url: String = DEFAULT_ROLE_URL,
         http: HttpGetter = { u, h -> defaultHttp(u, h) },
-    ): Result<Meta> {
-        return when (val out = http(url, authHeaders())) {
+    ): Result<Meta> = fetchMutex.withLock {
+        when (val out = http(url, authHeaders())) { // authHeaders 留锁内：ts 取真实发起时刻
             is HttpOutcome.Err -> Result.failure(MetadataException(MetaErrorReason.NETWORK))
             is HttpOutcome.Ok -> classify(out.status, out.body, cacheFile)
         }

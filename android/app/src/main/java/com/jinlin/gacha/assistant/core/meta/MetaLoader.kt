@@ -89,13 +89,46 @@ object MetaLoader {
      * 存**接收到的原始文本**（`role_cache.json` 落的是接口原样返回，不解析、不重排，
      * 对齐 09 §3.4.2「存原始响应」）。失败返回 `false` 而不抛（对齐 PC `_write_cache` 的
      * 「写失败不影响本次拉取」语义）；`fetch` 里成功也算已回写缓存成功。
+     *
+     * **temp+rename 原子写**（2026-09-29 起，关闭 11 §7 的非原子记录）：先写同目录
+     * `*.tmp` 再 `Files.move(REPLACE_EXISTING)`——Android/Linux 落 rename(2)，读侧
+     * 要么看到完整旧文件要么完整新文件，无撕裂（启动自动拉取会在后台覆盖缓存，与
+     * `StatsProvider` 主线程 [read] 并发；rename 失败兜底退回直接覆盖写，尽力而为）。
      */
     fun writeRaw(cacheFile: File, text: String): Boolean =
         try {
-            cacheFile.parentFile?.mkdirs()
-            cacheFile.writeText(text, Charsets.UTF_8)
-            true
+            // 目录守卫：目标路径是目录时直接判失败（否则 temp+rename 会把空目录顶掉反判成功，
+            // 破坏「失败返回 false」契约；旧实现 writeText 写目录必 IOException 返 false）。
+            if (cacheFile.isDirectory) {
+                false
+            } else {
+                writeRawInner(cacheFile, text)
+            }
         } catch (e: IOException) {
-            false
+            // rename 失败兜底：退回直接覆盖（旧语义，PC `_write_cache` 即非原子）。
+            try {
+                cacheFile.writeText(text, Charsets.UTF_8)
+                true
+            } catch (e2: IOException) {
+                false
+            }
         }
+
+    /** [writeRaw] 的 temp+rename 主体（成功 = rename 完成，无残留 tmp）。 */
+    private fun writeRawInner(cacheFile: File, text: String): Boolean {
+        cacheFile.parentFile?.mkdirs()
+        val tmp = File(cacheFile.parentFile, cacheFile.name + ".tmp")
+        try {
+            tmp.writeText(text, Charsets.UTF_8)
+            java.nio.file.Files.move(
+                tmp.toPath(),
+                cacheFile.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            )
+            return true
+        } finally {
+            // move 成功时 tmp 已不存在，delete 幂等；失败时清残留。
+            tmp.delete()
+        }
+    }
 }

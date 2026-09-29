@@ -1,10 +1,16 @@
 package com.jinlin.gacha.assistant.network
 
 import com.jinlin.gacha.assistant.core.Announcement
+import com.jinlin.gacha.assistant.core.meta.MetaLoader
 import com.jinlin.gacha.assistant.persistence.AnnouncementReadStore
+import com.jinlin.gacha.assistant.persistence.SettingsStore
 import java.io.File
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,9 +33,18 @@ import kotlinx.coroutines.withContext
  * 拉取顺序 **先公告、后更新**（§4.4，对齐 PC `__main__.py` 的 singleShot 顺序）；两者均静默失败
  * （公告 → 空列表、版本 → null，见各自 Client），不影响主程序。
  *
+ * ### 元数据自动拉取（2026-09-29 起，对齐 PC `remote_data.load_role_data` 的启动拉取）
+ * [checkNow] 内**并行**拉一次卡池元数据（`MetadataClient.fetch`）：成功即覆盖
+ * `role_cache.json` 并写 `metadata_version` / `metadata_fetched_at`（与设置页手动拉取同口径）；
+ * **失败静默**（刻意偏离 PC 的「卡池信息未更新」Warning 弹窗——安卓有出厂种子兜底，
+ * 离线时每次启动弹窗太打扰，2026-09-29 用户裁定），回退现有缓存/出厂种子。
+ * 顺序上刻意偏离 PC（PC 为 role→公告→版本）：元数据启动时无 UI 立即消费，并行拉取
+ * 不拖慢公告/更新弹窗时序（最坏延迟 = max 而非 sum）。
+ *
  * @param rootDir 数据根目录（生产 = `filesDir`，已读集合存这里；测试 = 临时目录）
+ * @param settings 设置仓库（元数据拉取成功后写两键；与手动拉取共用同一口径）
  */
-class UpdateCenter private constructor(rootDir: File) {
+class UpdateCenter internal constructor(private val rootDir: File, private val settings: SettingsStore) {
 
     companion object {
         /** UI 共用的进程级实例。 */
@@ -38,7 +53,7 @@ class UpdateCenter private constructor(rootDir: File) {
 
         fun get(context: android.content.Context): UpdateCenter =
             shared ?: synchronized(this) {
-                shared ?: UpdateCenter(context.filesDir).also { shared = it }
+                shared ?: UpdateCenter(context.filesDir, SettingsStore.get(context)).also { shared = it }
             }
 
         /** 仅供单测：重置进程级单例。 */
@@ -70,19 +85,41 @@ class UpdateCenter private constructor(rootDir: File) {
     fun beginStartupCheck(): Boolean = startupStarted.compareAndSet(false, true)
 
     /**
-     * 拉取公告与版本（先公告后更新，§4.4）。失败静默：公告空列表、版本 null。可随时重复调用。
+     * 拉取公告与版本（先公告后更新，§4.4），并**并行**拉一次卡池元数据（2026-09-29 起）。
+     * 失败静默：公告空列表、版本 null、元数据不动缓存。可随时重复调用。
      *
-     * **整个方法体在 [Dispatchers.IO] 执行**：两个 Client 的 `defaultHttp` 是阻塞
+     * **整个方法体在 [Dispatchers.IO] 执行**：各 Client 的 `defaultHttp` 是阻塞
      * HttpURLConnection I/O，而调用方协程多在主线程（`LaunchedEffect` / 设置页按钮）——
      * `suspend` 只挂起不换线程，不切调度器会在真机上抛 `NetworkOnMainThreadException`
      * 闪退（2026-09-28 红米 K60 实机抓到；MuMu ROM 网络栈绕过 BlockGuard 才侥幸没炸）。
      * StateFlow 赋值线程安全，回主线程的订阅更新无需额外处理。
+     *
+     * @param http HTTP 注入缝（缺省生产实现，现有调用点零改动；单测注入假实现全离线断言）
      */
-    suspend fun checkNow() = withContext(Dispatchers.IO) {
-        _announcements.value = AnnouncementClient.fetch()
-        _updateInfo.value = VersionClient.fetch()
-        _checked.value = true
-    }
+    suspend fun checkNow(http: HttpGetter = { u, h -> MetadataClient.defaultHttp(u, h) }) =
+        withContext(Dispatchers.IO) {
+            coroutineScope {
+                // 元数据并行拉（顺序刻意偏离 PC role→公告→版本：启动时无 UI 立即消费，
+                // 不拖慢公告/更新弹窗时序）。fetch 自身失败已封装为 Result.failure，
+                // runCatching 再兜 fetch 之外的意外异常；两条路都不打扰用户。
+                val meta = async { runCatching { MetadataClient.fetch(MetaLoader.cacheFile(rootDir), http = http) } }
+                // 公告/版本同样兜意外异常：各 Client 只把 Err outcome / 非 2xx 映射为静默
+                // （空列表 / null），http 抛非 IOException 时会穿透——runCatching 收口，
+                // 保证 checkNow 整体「怎么都不抛」（§12.7 测试口径）。
+                _announcements.value =
+                    runCatching { AnnouncementClient.fetch(http = http) }.getOrDefault(emptyList())
+                _updateInfo.value = runCatching { VersionClient.fetch(http = http) }.getOrNull()
+                // 成功：写 metadata_version / metadata_fetched_at（与手动拉取同口径；
+                // SettingsStore.update 是 @Synchronized，此处本就在 IO 线程，落盘不占主线程）。
+                // 失败：什么都不动，回退现有缓存/出厂种子（「最后拉取时间」不更新即最小信号）。
+                // 双层 Result 各取一层：外层 getOrNull 兜 fetch 之外的意外异常（runCatching），
+                // 内层 getOrNull 兜 MetadataException（网络/鉴权/格式等，fetch 已封装）。
+                meta.await().getOrNull()?.getOrNull()?.let { m ->
+                    settings.setMetadata(m.version.ifEmpty { "?" }, metadataFetchedAtNow())
+                }
+                _checked.value = true
+            }
+        }
 
     /**
      * 未读公告：按已读集合过滤（`pinned` 与 `update` 同规则）。
@@ -98,3 +135,7 @@ class UpdateCenter private constructor(rootDir: File) {
         ids.forEach { readStore.markRead(it) }
     }
 }
+
+/** 「最后拉取」时间文本（本地时区；设置页手动拉取与启动自动拉取共用同一格式，防两处漂移）。 */
+internal fun metadataFetchedAtNow(): String =
+    LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
